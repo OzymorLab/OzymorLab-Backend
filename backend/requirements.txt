@@ -1,0 +1,39 @@
+# ── Web Framework ──
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+python-multipart==0.0.20
+pydantic==2.11.3
+pydantic-settings==2.9.1
+
+# ── Database ──
+sqlalchemy[asyncio]==2.0.41
+asyncpg==0.30.0
+alembic==1.15.2
+psycopg2-binary==2.9.10
+
+# ── Celery (async tasks) ──
+celery[redis]==5.5.2
+redis==5.3.0
+
+# ── Google Gemini AI ──
+google-genai==1.16.1
+
+# ── Document Parsing ──
+PyMuPDF==1.25.5
+pytesseract==0.3.13
+Pillow==11.2.1
+
+# ── Math / Science ──
+sympy==1.13.3
+numpy==2.2.6
+scipy==1.15.3
+
+# ── Object Storage (MinIO) ──
+minio==7.2.16
+
+# ── Observability ──
+prometheus-fastapi-instrumentator==7.1.0
+
+# ── Utilities ──
+python-dotenv==1.1.0
+httpx==0.28.1

@@ -1,0 +1,77 @@
+"""
+Grade schemas — response models for grading results and run statistics.
+"""
+from pydantic import BaseModel, Field
+
+
+class StepGradeResult(BaseModel):
+    """Per-step grading result."""
+    step_num: int
+    marks_awarded: int
+    max_marks: int
+    grade_distribution: list[float] = Field(description="Length = max_marks + 1")
+    justification: str
+    error_type: str | None = None  # null | algebraic_error | missing_step | wrong_formula | presentation
+    sympy_valid: bool | None = None  # None = SymPy could not parse
+    sympy_error: str | None = None
+
+
+class GradeResultResponse(BaseModel):
+    """Full grade result with step-level trace."""
+    id: str
+    submission_id: str
+    grading_run_id: str
+    grade: int
+    max_grade: int
+    grade_distribution: list[float] = Field(description="Length = max_grade + 1, sums to 1.0")
+    confidence: float = Field(ge=0.0, le=1.0)
+    step_grades: list[StepGradeResult]
+    justification: str | None
+    model_used: str
+    graded_at: str
+    latency_ms: int | None
+
+    model_config = {"from_attributes": True}
+
+
+class GradingRunCreate(BaseModel):
+    """Schema for creating a new grading run."""
+    task_id: str
+    rubric_version: str | None = Field(default=None, description="If null, uses latest active rubric")
+    model: str | None = Field(default=None, description="Override default Gemini model")
+    temperature: float = Field(default=0.0, ge=0.0, le=1.0)
+    description: str | None = None
+
+
+class GradingRunResponse(BaseModel):
+    """Grading run status and progress."""
+    id: str
+    task_id: str
+    rubric_version: str
+    model: str
+    temperature: float
+    description: str | None
+    status: str  # CREATED | RUNNING | COMPLETED | FAILED
+    total_submissions: int
+    graded_count: int
+    failed_count: int
+    created_at: str
+    completed_at: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class RunStatistics(BaseModel):
+    """Aggregated statistics for a grading run."""
+    run_id: str
+    submission_count: int
+    graded_count: int
+    failed_count: int
+    mean_grade: float
+    median_grade: float
+    p25_grade: float
+    p75_grade: float
+    mean_confidence: float
+    mean_latency_ms: float
+    aggregate_distribution: list[float]
+    most_common_error: str | None
