@@ -28,22 +28,7 @@ services:
       timeout: 5s
       retries: 5
 
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-minioadmin123}
-    volumes:
-      - miniodata:/data
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+
 
   backend:
     build: ./backend
@@ -52,8 +37,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      minio:
         condition: service_healthy
     ports:
       - "8000:8000"
@@ -68,8 +51,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      minio:
         condition: service_healthy
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4
     volumes:
@@ -93,5 +74,4 @@ services:
 
 volumes:
   pgdata:
-  miniodata:
   grafanadata:

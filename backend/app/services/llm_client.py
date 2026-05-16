@@ -5,6 +5,7 @@ Uses Gemini 2.5 Pro for grading physics derivations.
 import json
 import time
 import logging
+import os
 from typing import Any
 
 from google import genai
@@ -24,8 +25,11 @@ def get_client() -> genai.Client:
     return _client
 
 
-GRADING_SYSTEM_PROMPT = """You are an expert CBSE Class 12 Physics examiner with 15 years of experience.
-You grade derivation answers step by step, awarding partial marks according to the CBSE marking scheme.
+def get_grading_system_prompt(subject: str = "General", board: str = "Generic", grade_level: str = "Unknown") -> str:
+    """Load the base system prompt dynamically based on the subject and append all markdown KB files."""
+    
+    base_prompt = f"""You are an expert {board} examiner ({grade_level} {subject}) with 15 years of experience.
+You grade subjective answers and derivations step by step, awarding partial marks according to the {board} marking scheme.
 You output ONLY valid JSON — no preamble, no markdown, no code fences.
 
 Grading philosophy:
@@ -34,9 +38,46 @@ Grading philosophy:
 - Accept equivalent mathematical expressions (e.g., F=ma and a=F/m are equivalent)
 - If a step is partially correct, award proportional partial credit"""
 
+    prompt = base_prompt
+    
+    # Path to the kb directory (backend/kb)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    kb_dir = os.path.join(os.path.dirname(os.path.dirname(current_dir)), "kb")
+    
+    if os.path.exists(kb_dir):
+        prompt += "\n\n--- ADDITIONAL GRADING GUIDELINES (KNOWLEDGE BASE) ---"
+        for filename in sorted(os.listdir(kb_dir)):
+            if filename.endswith(".md"):
+                filepath = os.path.join(kb_dir, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        prompt += f"\n\n### Document: {filename}\n"
+                        prompt += f.read()
+                except Exception as e:
+                    logger.error(f"Failed to load KB file {filename}: {e}")
+                    
+    return prompt
+
 ALIGNMENT_SYSTEM_PROMPT = """You are an expert at analyzing student answers and mapping them to rubric steps.
 Given rubric steps and student answer steps, map each rubric step to the most relevant student step(s).
 Output ONLY valid JSON — no preamble, no markdown, no code fences."""
+
+def extract_text_from_image_gemini(image_bytes: bytes) -> str:
+    """Use Gemini 2.5 Pro Vision to transcribe fuzzy handwritten text and math."""
+    client = get_client()
+    try:
+        response = client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                "Extract all the handwritten text, mathematical equations, and derivations from this image exactly as written. Do not summarize. Just output the transcribed text."
+            ]
+        )
+        return response.text or ""
+    except Exception as e:
+        logger.error(f"Gemini Vision OCR failed: {e}")
+        raise
+
 
 
 def call_gemini(

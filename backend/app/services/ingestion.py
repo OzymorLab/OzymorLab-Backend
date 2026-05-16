@@ -1,30 +1,46 @@
 """
-Ingestion service — handles file upload to MinIO and bucket management.
+Ingestion service — handles file upload to AWS S3.
 """
-import io
 import uuid
-from minio import Minio
-from minio.error import S3Error
+import logging
+import boto3
+from botocore.exceptions import ClientError
 
 from app.config import settings
 
+logger = logging.getLogger(__name__)
 
-def get_minio_client() -> Minio:
-    """Create a MinIO client instance."""
-    return Minio(
-        endpoint=settings.MINIO_ENDPOINT,
-        access_key=settings.MINIO_USER,
-        secret_key=settings.MINIO_PASSWORD,
-        secure=settings.MINIO_SECURE,
+
+def get_s3_client():
+    """Create an AWS S3 client instance."""
+    return boto3.client(
+        "s3",
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_REGION,
     )
 
 
-def ensure_bucket_exists(client: Minio | None = None) -> None:
-    """Create the submissions bucket if it doesn't exist."""
-    client = client or get_minio_client()
-    bucket = settings.MINIO_BUCKET
-    if not client.bucket_exists(bucket):
-        client.make_bucket(bucket)
+def ensure_bucket_exists(client=None) -> None:
+    """Create the S3 bucket if it doesn't exist."""
+    client = client or get_s3_client()
+    bucket = settings.S3_BUCKET
+    try:
+        client.head_bucket(Bucket=bucket)
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        if error_code == "404":
+            logger.info(f"Bucket {bucket} does not exist. Creating it...")
+            if settings.AWS_REGION == "us-east-1":
+                client.create_bucket(Bucket=bucket)
+            else:
+                client.create_bucket(
+                    Bucket=bucket,
+                    CreateBucketConfiguration={"LocationConstraint": settings.AWS_REGION},
+                )
+        else:
+            logger.error(f"Error checking bucket {bucket}: {e}")
+            raise
 
 
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
@@ -43,7 +59,7 @@ def validate_file(filename: str, file_size: int) -> tuple[bool, str | None]:
 
 def upload_file(file_data: bytes, filename: str, content_type: str) -> str:
     """
-    Upload a file to MinIO and return the object key.
+    Upload a file to AWS S3 and return the object key.
 
     Args:
         file_data: Raw file bytes
@@ -51,42 +67,37 @@ def upload_file(file_data: bytes, filename: str, content_type: str) -> str:
         content_type: MIME type
 
     Returns:
-        object_key: MinIO object key for retrieval
+        object_key: S3 object key for retrieval
     """
-    client = get_minio_client()
+    client = get_s3_client()
     ensure_bucket_exists(client)
 
     # Generate unique object key
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
     object_key = f"submissions/{uuid.uuid4()}.{ext}"
 
-    # Upload to MinIO
+    # Upload to S3
     client.put_object(
-        bucket_name=settings.MINIO_BUCKET,
-        object_name=object_key,
-        data=io.BytesIO(file_data),
-        length=len(file_data),
-        content_type=content_type,
+        Bucket=settings.S3_BUCKET,
+        Key=object_key,
+        Body=file_data,
+        ContentType=content_type,
     )
 
     return object_key
 
 
 def download_file(object_key: str) -> bytes:
-    """Download a file from MinIO by its object key."""
-    client = get_minio_client()
-    response = client.get_object(settings.MINIO_BUCKET, object_key)
-    try:
-        return response.read()
-    finally:
-        response.close()
-        response.release_conn()
+    """Download a file from AWS S3 by its object key."""
+    client = get_s3_client()
+    response = client.get_object(Bucket=settings.S3_BUCKET, Key=object_key)
+    return response["Body"].read()
 
 
 def delete_file(object_key: str) -> None:
-    """Delete a file from MinIO."""
-    client = get_minio_client()
+    """Delete a file from AWS S3."""
+    client = get_s3_client()
     try:
-        client.remove_object(settings.MINIO_BUCKET, object_key)
-    except S3Error:
-        pass  # File may not exist, that's fine
+        client.delete_object(Bucket=settings.S3_BUCKET, Key=object_key)
+    except ClientError as e:
+        logger.error(f"Failed to delete file {object_key}: {e}")
