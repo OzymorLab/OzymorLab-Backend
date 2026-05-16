@@ -19,12 +19,11 @@ class Settings(BaseSettings):
     # ── Redis ──
     REDIS_URL: str = "redis://redis:6379/0"
 
-    # ── MinIO ──
-    MINIO_ENDPOINT: str = "minio:9000"
-    MINIO_USER: str = "minioadmin"
-    MINIO_PASSWORD: str = "minioadmin123"
-    MINIO_BUCKET: str = "aios-submissions"
-    MINIO_SECURE: bool = False
+    # ── AWS S3 (Storage) ──
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_REGION: str = "us-east-1"
+    S3_BUCKET: str = "aios-submissions"
 
     # ── Google Gemini AI ──
     GEMINI_API_KEY: str = ""

@@ -38,13 +38,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
 
-    # Ensure MinIO bucket exists
+    # Ensure S3 bucket exists (if possible with current credentials)
     try:
         from app.services.ingestion import ensure_bucket_exists
         ensure_bucket_exists()
-        logger.info(f"MinIO bucket '{settings.MINIO_BUCKET}' ready")
+        logger.info(f"S3 bucket '{settings.S3_BUCKET}' ready")
     except Exception as e:
-        logger.warning(f"MinIO bucket setup failed (will retry on first upload): {e}")
+        logger.warning(f"S3 bucket check failed (ensure it exists in AWS): {e}")
 
     logger.info("AIOS Backend ready!")
     yield

@@ -8,7 +8,7 @@ from scipy.signal import fftconvolve
 
 from app.services.llm_client import (
     call_gemini, parse_json_response, build_step_grading_prompt,
-    build_alignment_prompt, GRADING_SYSTEM_PROMPT, ALIGNMENT_SYSTEM_PROMPT,
+    build_alignment_prompt, get_grading_system_prompt, ALIGNMENT_SYSTEM_PROMPT,
 )
 from app.services.sympy_validator import validate_expected_against_student
 
@@ -46,6 +46,9 @@ def grade_single_step(
     sympy_result: dict | None = None,
     board_notes: str = "",
     temperature: float = 0.0,
+    subject: str = "General",
+    board: str = "Generic",
+    grade_level: str = "Unknown",
 ) -> dict:
     """
     STEP 3: Grade a single rubric step using the hybrid pipeline.
@@ -69,7 +72,8 @@ def grade_single_step(
         }
 
     prompt = build_step_grading_prompt(rubric_step, student_step, sympy_result, board_notes)
-    result = call_gemini(prompt, system_prompt=GRADING_SYSTEM_PROMPT,
+    system_prompt = get_grading_system_prompt(subject=subject, board=board, grade_level=grade_level)
+    result = call_gemini(prompt, system_prompt=system_prompt,
                          temperature=temperature, call_type="step_grading")
 
     if not result["success"]:
@@ -162,6 +166,9 @@ def grade_submission(
     rubric: dict,
     parsed_content: dict,
     temperature: float = 0.0,
+    subject: str = "General",
+    board: str = "Generic",
+    grade_level: str = "Unknown",
 ) -> dict:
     """
     Full grading pipeline for a single submission.
@@ -238,7 +245,8 @@ def grade_submission(
 
         # STEP 3b + 3c: LLM grading
         step_result = grade_single_step(
-            rubric_step, student_step, sympy_result, board_notes, temperature
+            rubric_step, student_step, sympy_result, board_notes, temperature,
+            subject=subject, board=board, grade_level=grade_level
         )
         step_grades.append(step_result)
 

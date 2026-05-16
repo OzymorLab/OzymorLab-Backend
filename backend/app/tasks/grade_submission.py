@@ -31,13 +31,15 @@ def grade(self, submission_id: str, grading_run_id: str):
 
     session = get_sync_session()
     try:
-        # Load submission and run
+        # Load submission, run, and task
         submission = session.query(Submission).filter_by(id=submission_id).first()
         run = session.query(GradingRun).filter_by(id=grading_run_id).first()
 
         if not submission or not run:
             logger.error(f"Submission {submission_id} or run {grading_run_id} not found")
             return {"error": "Not found"}
+            
+        task = session.query(Task).filter_by(id=run.task_id).first()
 
         if submission.status != "PARSED" or not submission.parsed_content:
             logger.warning(f"Submission {submission_id} not in PARSED state (current: {submission.status})")
@@ -69,6 +71,9 @@ def grade(self, submission_id: str, grading_run_id: str):
             rubric=rubric_data,
             parsed_content=submission.parsed_content,
             temperature=run.temperature,
+            subject=task.subject if task else "General",
+            board=task.board if task else "Generic",
+            grade_level=task.grade_level if task else "Unknown",
         )
 
         # Store grade result
