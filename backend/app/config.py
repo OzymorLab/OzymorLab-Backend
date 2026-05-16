@@ -33,9 +33,32 @@ class Settings(BaseSettings):
     GRADING_TEMPERATURE: float = 0.0
     GRADING_MAX_RETRIES: int = 3
 
+    # ── DEIS (Diagram Evaluation Intelligence System) ──
+    DEIS_API_URL: str = "http://deis-gateway:8001"
+    DEIS_POLL_TIMEOUT: int = 60  # seconds to wait for diagram evaluation
+    DEIS_POLL_INTERVAL: int = 2  # seconds between status polls
+
+    # ── Confidence Validation ──
+    CONFIDENCE_AUTO_APPROVE: float = 0.6   # Below this → NEEDS_REVIEW
+    CONFIDENCE_COMPONENT_FLAG: float = 0.4  # Per-component flag threshold
+
+    # ── Label Validation ──
+    LABEL_FUZZY_THRESHOLD: int = 80  # 0-100, minimum similarity score for label match
+
     # ── Celery ──
     CELERY_BROKER_URL: str = "redis://redis:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://redis:6379/1"
+
+    # ── JWT Auth ──
+    JWT_SECRET_KEY: str = "edexia-secret-change-me-in-production"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # ── Rate Limiting ──
+    RATE_LIMIT_DEFAULT: str = "60/minute"
+    RATE_LIMIT_AUTH: str = "10/minute"
+    RATE_LIMIT_UPLOAD: str = "10/minute"
 
     @property
     def cors_origins_list(self) -> list[str]:

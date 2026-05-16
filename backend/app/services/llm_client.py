@@ -16,12 +16,22 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _client: genai.Client | None = None
+_client_key: str | None = None  # Track which key the cached client uses
 
 
-def get_client() -> genai.Client:
-    global _client
-    if _client is None:
-        _client = genai.Client(api_key=settings.GEMINI_API_KEY)
+def get_client(api_key: str | None = None) -> genai.Client:
+    """Get or create a Gemini client. Supports BYOK via api_key override."""
+    global _client, _client_key
+    key = api_key or settings.GEMINI_API_KEY
+
+    # If a BYOK key is provided, always create a fresh client (don't pollute cache)
+    if api_key:
+        return genai.Client(api_key=api_key)
+
+    # Use cached system client
+    if _client is None or _client_key != key:
+        _client = genai.Client(api_key=key)
+        _client_key = key
     return _client
 
 
@@ -86,9 +96,15 @@ def call_gemini(
     temperature: float | None = None,
     max_tokens: int = 2048,
     call_type: str = "general",
+    api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Make a call to Gemini API with retry logic and exponential backoff."""
-    client = get_client()
+    """Make a call to Gemini API with retry logic and exponential backoff.
+    
+    Args:
+        api_key: Optional BYOK Gemini API key. If provided, uses this key
+                 instead of the system-wide key from settings.
+    """
+    client = get_client(api_key=api_key)
     temp = temperature if temperature is not None else settings.GRADING_TEMPERATURE
     model = settings.GEMINI_MODEL
 

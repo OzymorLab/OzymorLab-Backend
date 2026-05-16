@@ -33,3 +33,11 @@ prometheus-fastapi-instrumentator==7.1.0
 # ── Utilities ──
 python-dotenv==1.1.0
 httpx==0.28.1
+requests==2.32.3
+thefuzz[speedup]==0.22.1
+
+# ── Auth & Security ──
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+slowapi==0.1.9
+

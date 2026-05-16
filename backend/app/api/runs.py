@@ -6,17 +6,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.db.session import get_db
-from app.db.models import GradingRun, GradeResult, Submission, TaskRubric, Task, DriftReport
+from app.db.models import GradingRun, GradeResult, Submission, TaskRubric, Task, DriftReport, User
 from app.schemas.common import ApiResponse
 from app.schemas.grade import GradingRunCreate, GradingRunResponse, RunStatistics, StepGradeResult, GradeResultResponse
 from app.schemas.observability import DriftReportResponse
 from app.config import settings
+from app.services.auth_service import get_current_user
 
 router = APIRouter(prefix="/runs", tags=["Grading Runs"])
 
 
 @router.post("")
-async def create_run(payload: GradingRunCreate, db: AsyncSession = Depends(get_db)):
+async def create_run(payload: GradingRunCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Create a new grading run configuration."""
     # Validate task
     result = await db.execute(select(Task).filter_by(id=payload.task_id))
@@ -70,7 +71,7 @@ async def create_run(payload: GradingRunCreate, db: AsyncSession = Depends(get_d
 
 
 @router.post("/{run_id}/start")
-async def start_run(run_id: str, db: AsyncSession = Depends(get_db)):
+async def start_run(run_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Start grading all parsed submissions for this run."""
     result = await db.execute(select(GradingRun).filter_by(id=run_id))
     run = result.scalar_one_or_none()
@@ -109,7 +110,7 @@ async def start_run(run_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{run_id}")
-async def get_run(run_id: str, db: AsyncSession = Depends(get_db)):
+async def get_run(run_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get grading run status and progress."""
     result = await db.execute(select(GradingRun).filter_by(id=run_id))
     run = result.scalar_one_or_none()
@@ -130,7 +131,7 @@ async def get_run(run_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{run_id}/results")
 async def get_run_results(run_id: str, page: int = 1, page_size: int = 20,
-                          db: AsyncSession = Depends(get_db)):
+                          db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get paginated grade results for a run."""
     offset = (page - 1) * page_size
     result = await db.execute(
@@ -157,7 +158,7 @@ async def get_run_results(run_id: str, page: int = 1, page_size: int = 20,
 
 
 @router.get("/{run_id}/statistics")
-async def get_run_statistics(run_id: str, db: AsyncSession = Depends(get_db)):
+async def get_run_statistics(run_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get aggregated statistics for a grading run."""
     result = await db.execute(select(GradingRun).filter_by(id=run_id))
     run = result.scalar_one_or_none()
@@ -185,7 +186,7 @@ async def get_run_statistics(run_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{run_id}/drift")
-async def get_run_drift(run_id: str, db: AsyncSession = Depends(get_db)):
+async def get_run_drift(run_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get drift report for this run vs baseline."""
     result = await db.execute(
         select(DriftReport).filter_by(current_run_id=run_id)

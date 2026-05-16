@@ -26,6 +26,27 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+class User(Base):
+    """User account — teachers, evaluators, admins."""
+    __tablename__ = "users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    full_name = Column(String(255), nullable=False)
+    role = Column(String(20), nullable=False, default="teacher")
+    # teacher | admin | evaluator
+    gemini_api_key = Column(Text, nullable=True)  # BYOK — user's own Gemini key
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        Index("idx_users_email", "email", unique=True),
+        Index("idx_users_role", "role"),
+    )
+
+
 class Task(Base):
     """Assessment task definition (e.g., a specific Physics question)."""
     __tablename__ = "tasks"
@@ -90,6 +111,9 @@ class Submission(Base):
     task = relationship("Task", back_populates="submissions")
     grade_results = relationship("GradeResult", back_populates="submission", lazy="selectin")
 
+    # Multimodal evaluation
+    question_decomposition = Column(JSONB, nullable=True)  # cached decomposition result
+
     __table_args__ = (
         Index("idx_submissions_task_id", "task_id"),
         Index("idx_submissions_status", "status"),
@@ -142,6 +166,16 @@ class GradeResult(Base):
     graded_at = Column(DateTime(timezone=True), default=utcnow)
     latency_ms = Column(Integer, nullable=True)
 
+    # Multimodal component evaluation
+    component_grades = Column(JSONB, nullable=True)  # per-component breakdown (text, diagram, labels, reasoning)
+    review_status = Column(String(20), nullable=False, default="AUTO_GRADED")
+    # AUTO_GRADED | NEEDS_REVIEW | REVIEWED | OVERRIDDEN
+    review_reasons = Column(JSONB, nullable=True)  # why human review is needed
+    flagged_components = Column(JSONB, nullable=True)  # list of flagged component types
+    review_notes = Column(Text, nullable=True)  # teacher's moderation notes
+    reviewed_by = Column(String(255), nullable=True)  # teacher/evaluator ID
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+
     # Relationships
     submission = relationship("Submission", back_populates="grade_results")
     grading_run = relationship("GradingRun", back_populates="grade_results")
@@ -149,6 +183,7 @@ class GradeResult(Base):
     __table_args__ = (
         Index("idx_grade_results_run_id", "grading_run_id"),
         Index("idx_grade_results_submission_id", "submission_id"),
+        Index("idx_grade_results_review_status", "review_status"),
     )
 
 

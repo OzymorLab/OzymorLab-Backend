@@ -14,6 +14,22 @@ class RubricStep(BaseModel):
     marking_notes: str = ""
     step_type: Literal["statement", "derivation", "result", "diagram"] = "statement"
     partial_credit: bool = True
+    component_type: Literal["text", "diagram", "labels", "reasoning"] | None = Field(
+        default=None,
+        description=(
+            "Explicitly tags which evaluation pipeline should handle this step. "
+            "If set on all steps, the system uses teacher-defined decomposition. "
+            "If not set, the system auto-decomposes using LLM or step_type fallback."
+        ),
+    )
+    diagram_relations: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "For diagram steps only. Expected label→region mappings used by the DEIS "
+            "Diagram-marker for graph isomorphism scoring. "
+            "Example: [{'label': 'aorta', 'region': 'region_0'}, {'label': 'left ventricle', 'region': 'region_1'}]"
+        ),
+    )
 
 
 class TaskRubricCreate(BaseModel):

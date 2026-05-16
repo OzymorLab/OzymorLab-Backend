@@ -6,11 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.db.session import get_db
-from app.db.models import Submission, GradeResult, Task
+from app.db.models import Submission, GradeResult, Task, User
 from app.schemas.common import ApiResponse
 from app.schemas.submission import SubmissionResponse, SubmissionUploadResponse, ParsedContent
 from app.schemas.grade import StepGradeResult, GradeResultResponse
 from app.services.ingestion import validate_file, upload_file
+from app.services.auth_service import get_current_user
 
 router = APIRouter(prefix="/submissions", tags=["Submissions"])
 
@@ -21,6 +22,7 @@ async def create_submission(
     student_id: str = Form(...),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Upload a student submission file → store in MinIO → queue for parsing."""
     # Validate task exists
@@ -68,7 +70,7 @@ async def create_submission(
 
 
 @router.get("/{submission_id}")
-async def get_submission(submission_id: str, db: AsyncSession = Depends(get_db)):
+async def get_submission(submission_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get submission status and parsed content."""
     result = await db.execute(select(Submission).filter_by(id=submission_id))
     submission = result.scalar_one_or_none()
@@ -100,6 +102,7 @@ async def list_submissions(
     task_id: str | None = None,
     status: str | None = None,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """List submissions, optionally filtered by task_id and/or status."""
     query = select(Submission).order_by(Submission.created_at.desc())
@@ -120,7 +123,7 @@ async def list_submissions(
 
 
 @router.get("/{submission_id}/grade")
-async def get_submission_grade(submission_id: str, db: AsyncSession = Depends(get_db)):
+async def get_submission_grade(submission_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get the grade result for a submission with full step trace."""
     result = await db.execute(
         select(GradeResult).filter_by(submission_id=submission_id)
