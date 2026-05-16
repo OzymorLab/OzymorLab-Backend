@@ -67,6 +67,14 @@ def grade(self, submission_id: str, grading_run_id: str):
         rubric_data["grading_notes"] = rubric_record.grading_notes or ""
         rubric_data["model"] = run.model
 
+        # Load BYOK Gemini key if the run creator has one
+        from app.db.models import User
+        user_gemini_key = None
+        if run.created_by:
+            user = session.query(User).filter_by(id=run.created_by).first()
+            if user and user.gemini_api_key:
+                user_gemini_key = user.gemini_api_key
+
         result = grade_submission(
             rubric=rubric_data,
             parsed_content=submission.parsed_content,
@@ -74,6 +82,9 @@ def grade(self, submission_id: str, grading_run_id: str):
             subject=task.subject if task else "General",
             board=task.board if task else "Generic",
             grade_level=task.grade_level if task else "Unknown",
+            file_key=submission.file_key,
+            submission_id=str(submission.id),
+            user_gemini_key=user_gemini_key,
         )
 
         # Store grade result
@@ -90,8 +101,17 @@ def grade(self, submission_id: str, grading_run_id: str):
             llm_call_ids=result.get("llm_call_ids", []),
             model_used=result["model_used"],
             latency_ms=result["latency_ms"],
+            # Multimodal evaluation fields
+            component_grades=result.get("component_grades"),
+            review_status=result.get("review_status", "AUTO_GRADED"),
+            review_reasons=result.get("review_reasons"),
+            flagged_components=result.get("flagged_components"),
         )
         session.add(grade_result)
+
+        # Cache question decomposition on the submission
+        if result.get("question_decomposition"):
+            submission.question_decomposition = result["question_decomposition"]
 
         # Update submission and run counters
         submission.status = "GRADED"

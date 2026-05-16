@@ -7,16 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.db.session import get_db
-from app.db.models import Task, TaskRubric, GradingAlert
+from app.db.models import Task, TaskRubric, GradingAlert, User
 from app.schemas.common import ApiResponse
 from app.schemas.rubric import TaskCreate, TaskResponse, TaskRubricCreate, TaskRubricResponse
 from app.schemas.observability import GradingAlertResponse, SetBaselineRequest
+from app.services.auth_service import get_current_user
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
 
 @router.post("")
-async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
+async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Create a new assessment task, optionally with an initial rubric."""
     task = Task(
         title=payload.title,
@@ -61,7 +62,7 @@ async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{task_id}")
-async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
+async def get_task(task_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get a task with its current active rubric."""
     result = await db.execute(select(Task).filter_by(id=task_id))
     task = result.scalar_one_or_none()
@@ -96,7 +97,7 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("")
-async def list_tasks(db: AsyncSession = Depends(get_db)):
+async def list_tasks(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """List all tasks."""
     result = await db.execute(select(Task).order_by(Task.created_at.desc()))
     tasks = result.scalars().all()
@@ -110,7 +111,7 @@ async def list_tasks(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{task_id}/rubrics")
-async def create_rubric(task_id: str, payload: TaskRubricCreate, db: AsyncSession = Depends(get_db)):
+async def create_rubric(task_id: str, payload: TaskRubricCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Upload a new rubric version for a task."""
     result = await db.execute(select(Task).filter_by(id=task_id))
     task = result.scalar_one_or_none()
@@ -141,7 +142,7 @@ async def create_rubric(task_id: str, payload: TaskRubricCreate, db: AsyncSessio
 
 
 @router.post("/{task_id}/baseline")
-async def set_baseline(task_id: str, payload: SetBaselineRequest, db: AsyncSession = Depends(get_db)):
+async def set_baseline(task_id: str, payload: SetBaselineRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Set a grading run as the drift baseline for a task."""
     result = await db.execute(select(Task).filter_by(id=task_id))
     task = result.scalar_one_or_none()
@@ -153,7 +154,7 @@ async def set_baseline(task_id: str, payload: SetBaselineRequest, db: AsyncSessi
 
 
 @router.get("/{task_id}/alerts")
-async def get_task_alerts(task_id: str, resolved: bool = False, db: AsyncSession = Depends(get_db)):
+async def get_task_alerts(task_id: str, resolved: bool = False, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get active alerts for a task."""
     query = select(GradingAlert).filter_by(task_id=task_id, resolved=resolved).order_by(GradingAlert.created_at.desc())
     result = await db.execute(query)

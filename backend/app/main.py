@@ -5,9 +5,13 @@ FastAPI application entry point.
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
 from app.db.session import init_db
@@ -20,6 +24,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── Rate Limiter ──
+limiter = Limiter(key_func=get_remote_address, default_limits=[settings.RATE_LIMIT_DEFAULT])
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -29,6 +36,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"Environment: {settings.APP_ENV}")
     logger.info(f"Version: {settings.APP_VERSION}")
     logger.info(f"Gemini Model: {settings.GEMINI_MODEL}")
+    logger.info(f"Rate Limit: {settings.RATE_LIMIT_DEFAULT}")
     logger.info("=" * 60)
 
     # Initialize database tables
@@ -64,6 +72,10 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# ── Rate Limiting Middleware ──
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -78,14 +90,18 @@ Instrumentator().instrument(app).expose(app)
 
 # Register API routers
 from app.api.health import router as health_router
+from app.api.auth import router as auth_router
 from app.api.tasks import router as tasks_router
 from app.api.submissions import router as submissions_router
 from app.api.runs import router as runs_router
+from app.api.reviews import router as reviews_router
 
 app.include_router(health_router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")
 app.include_router(tasks_router, prefix="/api/v1")
 app.include_router(submissions_router, prefix="/api/v1")
 app.include_router(runs_router, prefix="/api/v1")
+app.include_router(reviews_router, prefix="/api/v1")
 
 
 @app.get("/", tags=["Root"])

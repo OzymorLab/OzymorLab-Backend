@@ -101,3 +101,29 @@ def delete_file(object_key: str) -> None:
         client.delete_object(Bucket=settings.S3_BUCKET, Key=object_key)
     except ClientError as e:
         logger.error(f"Failed to delete file {object_key}: {e}")
+
+
+def generate_presigned_url(object_key: str, expiry_seconds: int = 3600) -> str:
+    """
+    Generate a presigned URL for an S3 object.
+    Used by the DEIS Diagram-marker to download submission images
+    without requiring AWS credentials.
+
+    Args:
+        object_key: S3 object key
+        expiry_seconds: URL validity period (default 1 hour)
+
+    Returns:
+        Presigned URL string
+    """
+    client = get_s3_client()
+    try:
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": settings.S3_BUCKET, "Key": object_key},
+            ExpiresIn=expiry_seconds,
+        )
+        return url
+    except ClientError as e:
+        logger.error(f"Failed to generate presigned URL for {object_key}: {e}")
+        raise

@@ -1,165 +1,32 @@
 """
-Grading service — hybrid SymPy + LLM grading pipeline orchestrator.
-Implements the 6-step grading flow from the technical proposal.
-"""
-import logging
-import numpy as np
-from scipy.signal import fftconvolve
+Grading Orchestrator — Parallel Component-Based Multimodal Evaluation.
 
-from app.services.llm_client import (
-    call_gemini, parse_json_response, build_step_grading_prompt,
-    build_alignment_prompt, get_grading_system_prompt, ALIGNMENT_SYSTEM_PROMPT,
-)
-from app.services.sympy_validator import validate_expected_against_student
+This is the central orchestrator that implements the proposed architecture:
+
+  1. Question Decomposition → identify evaluation components
+  2. Fan out to parallel pipelines:
+     - Text Evaluation Pipeline       → theory marks
+     - Diagram Evaluation Pipeline    → diagram marks (via DEIS)
+     - Label Validation Pipeline      → label marks
+     - Structured Reasoning Pipeline  → reasoning marks
+  3. Score Fusion Engine              → cumulative grade
+  4. Confidence Validation            → human review flagging
+
+Each component is evaluated independently and then combined.
+This mirrors real human evaluation behavior.
+"""
+import time
+import logging
+
+from app.services.question_decomposer import decompose_question
+from app.services.text_evaluator import evaluate_text_component
+from app.services.diagram_client import evaluate_diagram_step
+from app.services.label_evaluator import evaluate_label_component
+from app.services.reasoning_evaluator import evaluate_reasoning_component
+from app.services.score_fusion import fuse_component_scores
+from app.services.confidence_validator import validate_confidence
 
 logger = logging.getLogger(__name__)
-
-
-def align_steps(rubric_steps: list[dict], student_steps: list[dict]) -> list[dict]:
-    """
-    STEP 2: Align parsed student steps to rubric steps using LLM.
-    Returns mapping of rubric_step → student_step(s).
-    """
-    if not rubric_steps or not student_steps:
-        return [{"rubric_step": s.get("step_num", i+1), "student_steps": [], "confidence": 0.0}
-                for i, s in enumerate(rubric_steps)]
-
-    prompt = build_alignment_prompt(rubric_steps, student_steps)
-    result = call_gemini(prompt, system_prompt=ALIGNMENT_SYSTEM_PROMPT, call_type="alignment")
-
-    if not result["success"]:
-        # Fallback: positional mapping
-        return [{"rubric_step": i+1, "student_steps": [i+1] if i < len(student_steps) else [], "confidence": 0.5}
-                for i in range(len(rubric_steps))]
-
-    alignment = parse_json_response(result["response_text"])
-    if not alignment or not isinstance(alignment, list):
-        return [{"rubric_step": i+1, "student_steps": [i+1] if i < len(student_steps) else [], "confidence": 0.5}
-                for i in range(len(rubric_steps))]
-
-    return alignment
-
-
-def grade_single_step(
-    rubric_step: dict,
-    student_step: dict | None,
-    sympy_result: dict | None = None,
-    board_notes: str = "",
-    temperature: float = 0.0,
-    subject: str = "General",
-    board: str = "Generic",
-    grade_level: str = "Unknown",
-) -> dict:
-    """
-    STEP 3: Grade a single rubric step using the hybrid pipeline.
-    Returns per-step grade result.
-    """
-    max_marks = rubric_step.get("marks", 1)
-
-    # If no student step matched, award 0
-    if student_step is None:
-        dist = [0.0] * (max_marks + 1)
-        dist[0] = 1.0
-        return {
-            "step_num": rubric_step.get("step_num", 0),
-            "marks_awarded": 0,
-            "max_marks": max_marks,
-            "grade_distribution": dist,
-            "justification": "No matching student answer found for this rubric step.",
-            "error_type": "missing_step",
-            "sympy_valid": None,
-            "sympy_error": None,
-        }
-
-    prompt = build_step_grading_prompt(rubric_step, student_step, sympy_result, board_notes)
-    system_prompt = get_grading_system_prompt(subject=subject, board=board, grade_level=grade_level)
-    result = call_gemini(prompt, system_prompt=system_prompt,
-                         temperature=temperature, call_type="step_grading")
-
-    if not result["success"]:
-        dist = [0.0] * (max_marks + 1)
-        dist[0] = 1.0
-        return {
-            "step_num": rubric_step.get("step_num", 0),
-            "marks_awarded": 0, "max_marks": max_marks,
-            "grade_distribution": dist,
-            "justification": f"LLM grading failed: {result.get('error', 'Unknown')}",
-            "error_type": None,
-            "sympy_valid": sympy_result.get("valid") if sympy_result else None,
-            "sympy_error": sympy_result.get("error") if sympy_result else None,
-        }
-
-    parsed = parse_json_response(result["response_text"])
-    if not parsed or not isinstance(parsed, dict):
-        dist = [0.0] * (max_marks + 1)
-        dist[max_marks // 2] = 1.0  # uncertain → middle
-        return {
-            "step_num": rubric_step.get("step_num", 0),
-            "marks_awarded": max_marks // 2, "max_marks": max_marks,
-            "grade_distribution": dist,
-            "justification": "LLM response could not be parsed.",
-            "error_type": None,
-            "sympy_valid": sympy_result.get("valid") if sympy_result else None,
-            "sympy_error": sympy_result.get("error") if sympy_result else None,
-        }
-
-    # Normalize the grade distribution
-    grade_dist = parsed.get("grade_distribution", [])
-    if len(grade_dist) != max_marks + 1:
-        grade_dist = [0.0] * (max_marks + 1)
-        awarded = min(max(parsed.get("marks_awarded", 0), 0), max_marks)
-        grade_dist[awarded] = 1.0
-    else:
-        total = sum(grade_dist)
-        if total > 0:
-            grade_dist = [x / total for x in grade_dist]
-        else:
-            grade_dist[0] = 1.0
-
-    return {
-        "step_num": rubric_step.get("step_num", 0),
-        "marks_awarded": min(max(parsed.get("marks_awarded", 0), 0), max_marks),
-        "max_marks": max_marks,
-        "grade_distribution": grade_dist,
-        "justification": parsed.get("justification", ""),
-        "error_type": parsed.get("error_type"),
-        "sympy_valid": sympy_result.get("valid") if sympy_result else None,
-        "sympy_error": sympy_result.get("error") if sympy_result else None,
-        "llm_call_id": None,  # filled by caller
-    }
-
-
-def convolve_distributions(step_distributions: list[list[float]]) -> list[float]:
-    """
-    STEP 4: Compute the submission-level grade distribution by convolving per-step distributions.
-    This is mathematically precise — represents true joint uncertainty.
-    """
-    if not step_distributions:
-        return [1.0]
-
-    result = np.array(step_distributions[0], dtype=float)
-    for dist in step_distributions[1:]:
-        result = fftconvolve(result, np.array(dist, dtype=float), mode="full")
-
-    # Normalize
-    total = result.sum()
-    if total > 0:
-        result = result / total
-
-    return result.tolist()
-
-
-def compute_confidence(grade_distribution: list[float]) -> float:
-    """Compute confidence as 1 - normalized entropy of the distribution."""
-    dist = np.array(grade_distribution, dtype=float)
-    dist = dist[dist > 0]  # remove zeros for entropy calc
-    if len(dist) <= 1:
-        return 1.0
-    entropy = -np.sum(dist * np.log2(dist))
-    max_entropy = np.log2(len(grade_distribution))
-    if max_entropy == 0:
-        return 1.0
-    return float(1.0 - (entropy / max_entropy))
 
 
 def grade_submission(
@@ -169,110 +36,228 @@ def grade_submission(
     subject: str = "General",
     board: str = "Generic",
     grade_level: str = "Unknown",
+    file_key: str | None = None,
+    submission_id: str | None = None,
+    user_gemini_key: str | None = None,
 ) -> dict:
     """
-    Full grading pipeline for a single submission.
+    Full multimodal grading pipeline for a single submission.
 
-    Steps:
-    1. Load rubric (passed in)
-    2. Align student steps to rubric steps
-    3. For each rubric step: SymPy validation → LLM grading
-    4. Convolve step distributions → total distribution
-    5. Return complete grade result
+    Flow:
+      1. Decompose question into evaluation components.
+      2. Route each component to its dedicated pipeline.
+      3. Fuse component scores into a cumulative grade.
+      4. Validate confidence and flag for human review if needed.
 
     Args:
-        rubric: The task rubric with steps
-        parsed_content: The parsed submission content
-        temperature: Grading temperature
+        rubric: The task rubric with steps, grading_notes, model.
+        parsed_content: Parsed submission with steps, has_diagrams, etc.
+        temperature: LLM grading temperature.
+        subject: Subject name for system prompt.
+        board: Board name (CBSE, ICSE, etc).
+        grade_level: Grade level (Class 10, Class 12, etc).
+        file_key: S3 object key for the submission file (needed for diagram eval).
+        submission_id: Submission UUID for traceability.
+        user_gemini_key: Optional BYOK Gemini API key for this user.
 
     Returns:
-        Complete grade result dict
+        Complete grade result dict with component breakdown and review status.
     """
-    import time
     start_time = time.time()
 
     rubric_steps = rubric.get("steps", [])
     student_steps = parsed_content.get("steps", [])
     board_notes = rubric.get("grading_notes", "")
+    question_text = rubric.get("description", "")
 
-    # STEP 2: Align steps
-    alignment = align_steps(rubric_steps, student_steps)
+    # ═══════════════════════════════════════════════════════════
+    # STEP 1: Question Decomposition
+    # ═══════════════════════════════════════════════════════════
+    logger.info("Step 1: Decomposing question into evaluation components...")
+    components = decompose_question(rubric_steps, question_text)
 
-    # STEP 3: Grade each rubric step
-    step_grades = []
-    llm_call_ids = []
-    student_steps_by_num = {s.get("step_num", i+1): s for i, s in enumerate(student_steps)}
+    if not components:
+        logger.warning("No components found. Falling back to single text component.")
+        components = [{
+            "type": "text",
+            "description": "Full answer evaluation",
+            "max_marks": sum(s.get("marks", 0) for s in rubric_steps),
+            "rubric_steps": [s.get("step_num", i + 1) for i, s in enumerate(rubric_steps)],
+            "source": "fallback",
+        }]
 
-    for rubric_step in rubric_steps:
-        rs_num = rubric_step.get("step_num", 0)
+    logger.info(
+        f"Decomposed into {len(components)} components: "
+        f"{[c['type'] for c in components]}"
+    )
 
-        # Find aligned student steps
-        aligned = next((a for a in alignment if a.get("rubric_step") == rs_num), None)
-        aligned_nums = aligned.get("student_steps", []) if aligned else []
+    # ═══════════════════════════════════════════════════════════
+    # STEP 2: Parallel Pipeline Evaluation
+    # ═══════════════════════════════════════════════════════════
+    component_results = []
+    deis_result_cache = None  # Cache DEIS result for both diagram and labels
 
-        # Merge aligned student steps into one
-        if aligned_nums:
-            merged_text = "\n".join(
-                student_steps_by_num[n].get("text", "") for n in aligned_nums if n in student_steps_by_num
-            )
-            merged_eqs = []
-            for n in aligned_nums:
-                if n in student_steps_by_num:
-                    merged_eqs.extend(student_steps_by_num[n].get("equations", []))
-            student_step = {"text": merged_text, "equations": merged_eqs, "step_num": aligned_nums[0]}
-        else:
-            student_step = None
-
-        # STEP 3a: SymPy validation for derivation steps
-        sympy_result = None
-        if (rubric_step.get("step_type") == "derivation"
-                and rubric_step.get("expected_exprs")
-                and student_step and student_step.get("equations")):
-            validations = validate_expected_against_student(
-                rubric_step["expected_exprs"],
-                student_step["equations"],
-            )
-            # Use the overall validation result
-            all_valid = all(v.get("valid") is True for v in validations)
-            any_invalid = any(v.get("valid") is False for v in validations)
-            if all_valid:
-                sympy_result = {"valid": True, "error": None}
-            elif any_invalid:
-                errors = [v["error"] for v in validations if v.get("valid") is False]
-                sympy_result = {"valid": False, "error": "; ".join(errors)}
-            else:
-                sympy_result = {"valid": None, "error": "Could not parse expressions", "fallback": True}
-
-        # STEP 3b + 3c: LLM grading
-        step_result = grade_single_step(
-            rubric_step, student_step, sympy_result, board_notes, temperature,
-            subject=subject, board=board, grade_level=grade_level
+    for component in components:
+        ctype = component.get("type", "text")
+        logger.info(
+            f"Evaluating component: {ctype} "
+            f"(max_marks={component.get('max_marks')}, "
+            f"steps={component.get('rubric_steps')})"
         )
-        step_grades.append(step_result)
 
-    # STEP 4: Aggregate distributions via convolution
-    step_distributions = [sg["grade_distribution"] for sg in step_grades]
-    total_distribution = convolve_distributions(step_distributions)
+        if ctype == "text":
+            # ── Text Evaluation Pipeline ──
+            result = evaluate_text_component(
+                component=component,
+                rubric_steps=rubric_steps,
+                student_steps=student_steps,
+                board_notes=board_notes,
+                temperature=temperature,
+                subject=subject,
+                board=board,
+                grade_level=grade_level,
+            )
+            component_results.append(result)
 
-    # Calculate totals
-    total_grade = sum(sg["marks_awarded"] for sg in step_grades)
-    max_grade = sum(sg["max_marks"] for sg in step_grades)
-    confidence = compute_confidence(total_distribution)
+        elif ctype == "diagram":
+            # ── Diagram Evaluation Pipeline (via DEIS) ──
+            if file_key:
+                # Find the rubric step with diagram_relations
+                component_step_nums = set(component.get("rubric_steps", []))
+                diagram_rubric_step = next(
+                    (s for s in rubric_steps if s.get("step_num") in component_step_nums),
+                    None,
+                )
+                if diagram_rubric_step:
+                    result = evaluate_diagram_step(
+                        file_key=file_key,
+                        rubric_step=diagram_rubric_step,
+                        question_id=rubric.get("task_id", ""),
+                        submission_id=submission_id or "",
+                    )
+                    # Cache the DEIS result for the label pipeline
+                    deis_result_cache = result.get("_deis_raw", result)
 
-    # Overall justification
-    justifications = [f"Step {sg['step_num']}: {sg['justification']}" for sg in step_grades if sg.get("justification")]
-    overall_justification = " | ".join(justifications)
+                    component_results.append({
+                        "type": "diagram",
+                        "marks_awarded": result.get("marks_awarded", 0),
+                        "max_marks": result.get("max_marks", component.get("max_marks", 0)),
+                        "confidence": result.get("deis_confidence", 0.5),
+                        "grade_distribution": result.get("grade_distribution", [1.0]),
+                        "justification": result.get("justification", ""),
+                    })
+                else:
+                    component_results.append(_zero_component("diagram", component))
+            else:
+                logger.warning("Diagram component found but no file_key provided.")
+                component_results.append(_zero_component("diagram", component,
+                    justification="Submission file not accessible for diagram evaluation."))
+
+        elif ctype == "labels":
+            # ── Label Validation Pipeline ──
+            result = evaluate_label_component(
+                component=component,
+                deis_result=deis_result_cache,
+                rubric_steps=rubric_steps,
+            )
+            component_results.append(result)
+
+        elif ctype == "reasoning":
+            # ── Structured Reasoning Pipeline ──
+            result = evaluate_reasoning_component(
+                component=component,
+                rubric_steps=rubric_steps,
+                student_steps=student_steps,
+                board_notes=board_notes,
+                temperature=temperature,
+                subject=subject,
+                board=board,
+                grade_level=grade_level,
+            )
+            component_results.append(result)
+
+        else:
+            logger.warning(f"Unknown component type '{ctype}', treating as text.")
+            result = evaluate_text_component(
+                component=component,
+                rubric_steps=rubric_steps,
+                student_steps=student_steps,
+                board_notes=board_notes,
+                temperature=temperature,
+                subject=subject,
+                board=board,
+                grade_level=grade_level,
+            )
+            component_results.append(result)
+
+    # ═══════════════════════════════════════════════════════════
+    # STEP 3: Score Fusion
+    # ═══════════════════════════════════════════════════════════
+    logger.info("Step 3: Fusing component scores...")
+    fused_result = fuse_component_scores(component_results)
+
+    # ═══════════════════════════════════════════════════════════
+    # STEP 4: Confidence Validation
+    # ═══════════════════════════════════════════════════════════
+    logger.info("Step 4: Validating confidence...")
+    fused_result = validate_confidence(fused_result)
 
     latency_ms = int((time.time() - start_time) * 1000)
 
+    # Build final result
     return {
-        "grade": total_grade,
-        "max_grade": max_grade,
-        "grade_distribution": total_distribution,
-        "confidence": confidence,
-        "step_grades": step_grades,
-        "justification": overall_justification,
-        "llm_call_ids": llm_call_ids,
+        "grade": fused_result["grade"],
+        "max_grade": fused_result["max_grade"],
+        "grade_distribution": fused_result["grade_distribution"],
+        "confidence": fused_result["confidence"],
+        "step_grades": _extract_step_grades(component_results),
+        "component_grades": fused_result["component_grades"],
+        "justification": fused_result["justification"],
+        "review_status": fused_result.get("review_status", "AUTO_GRADED"),
+        "review_reasons": fused_result.get("review_reasons", []),
+        "flagged_components": fused_result.get("flagged_components", []),
+        "question_decomposition": components,
+        "llm_call_ids": [],
         "model_used": rubric.get("model", "gemini-2.5-pro"),
         "latency_ms": latency_ms,
     }
+
+
+def _zero_component(ctype: str, component: dict, justification: str = "") -> dict:
+    """Create a zero-score component result."""
+    max_marks = component.get("max_marks", 0)
+    dist = [0.0] * (max_marks + 1) if max_marks > 0 else [1.0]
+    if dist:
+        dist[0] = 1.0
+    return {
+        "type": ctype,
+        "marks_awarded": 0,
+        "max_marks": max_marks,
+        "confidence": 0.0,
+        "grade_distribution": dist,
+        "justification": justification or f"No {ctype} evaluation performed.",
+    }
+
+
+def _extract_step_grades(component_results: list[dict]) -> list[dict]:
+    """
+    Extract individual step grades from component results for backward compatibility.
+    The old schema expects a flat list of per-step grades.
+    """
+    step_grades = []
+    for cr in component_results:
+        if "step_grades" in cr and isinstance(cr["step_grades"], list):
+            step_grades.extend(cr["step_grades"])
+        else:
+            # Create a synthetic step grade from the component
+            step_grades.append({
+                "step_num": 0,
+                "marks_awarded": cr.get("marks_awarded", 0),
+                "max_marks": cr.get("max_marks", 0),
+                "grade_distribution": cr.get("grade_distribution", [1.0]),
+                "justification": cr.get("justification", ""),
+                "error_type": None,
+                "sympy_valid": None,
+                "sympy_error": None,
+            })
+    return step_grades
