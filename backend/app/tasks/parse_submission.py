@@ -1,6 +1,6 @@
 """
 Celery task: parse a submission.
-Downloads file from MinIO → extracts text → segments steps → updates DB.
+Downloads file from S3 → extracts text → segments steps → updates DB.
 """
 import logging
 from sqlalchemy import create_engine
@@ -23,7 +23,7 @@ def get_sync_session() -> Session:
 @celery_app.task(bind=True, name="app.tasks.parse_submission.parse", max_retries=2)
 def parse(self, submission_id: str):
     """
-    Parse a submission: download from MinIO, extract text, segment steps.
+    Parse a submission: download from S3, extract text, segment steps.
     Updates the submission record in PostgreSQL.
     """
     from app.db.models import Submission
@@ -40,7 +40,7 @@ def parse(self, submission_id: str):
         submission.status = "PARSING"
         session.commit()
 
-        # Download file from MinIO
+        # Download file from S3
         file_data = download_file(submission.file_key)
         file_type = submission.file_type or "pdf"
 

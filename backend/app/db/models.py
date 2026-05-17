@@ -58,6 +58,7 @@ class Task(Base):
     grade_level = Column(String(20), nullable=True)  # e.g., "Class 12"
     max_marks = Column(Integer, nullable=False)
     description = Column(Text, nullable=True)
+    question_paper_key = Column(Text, nullable=True)  # S3 object key for uploaded question paper
     baseline_run_id = Column(UUID(as_uuid=True), nullable=True)  # designated drift baseline
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -96,7 +97,7 @@ class Submission(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False)
     student_id = Column(String(255), nullable=False)
-    file_key = Column(Text, nullable=False)  # MinIO object key
+    file_key = Column(Text, nullable=False)  # S3 object key
     file_name = Column(String(500), nullable=True)
     file_type = Column(String(20), nullable=True)  # pdf, png, jpg, jpeg
     raw_text = Column(Text, nullable=True)  # extracted text

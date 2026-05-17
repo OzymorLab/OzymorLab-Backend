@@ -95,6 +95,7 @@ from app.api.tasks import router as tasks_router
 from app.api.submissions import router as submissions_router
 from app.api.runs import router as runs_router
 from app.api.reviews import router as reviews_router
+from app.api.question_papers import router as question_papers_router
 
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
@@ -102,6 +103,7 @@ app.include_router(tasks_router, prefix="/api/v1")
 app.include_router(submissions_router, prefix="/api/v1")
 app.include_router(runs_router, prefix="/api/v1")
 app.include_router(reviews_router, prefix="/api/v1")
+app.include_router(question_papers_router, prefix="/api/v1")
 
 
 @app.get("/", tags=["Root"])
