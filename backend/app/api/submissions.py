@@ -1,17 +1,23 @@
 """
-Submissions API — file upload, status tracking, grade retrieval.
+Submissions API — file upload, bulk upload, status tracking, grade retrieval.
 """
+import json
+import re
+from typing import List
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.db.session import get_db
-from app.db.models import Submission, GradeResult, Task, User
+from app.db.models import Submission, GradeResult, GradingRun, Task, TaskRubric, User
 from app.schemas.common import ApiResponse
 from app.schemas.submission import SubmissionResponse, SubmissionUploadResponse, ParsedContent
 from app.schemas.grade import StepGradeResult, GradeResultResponse
 from app.services.ingestion import validate_file, upload_file
 from app.services.auth_service import get_current_user
+from app.config import settings
 
 router = APIRouter(prefix="/submissions", tags=["Submissions"])
 
@@ -24,7 +30,7 @@ async def create_submission(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Upload a student submission file → store in MinIO → queue for parsing."""
+    """Upload a student submission file → store in S3 → queue for parsing."""
     # Validate task exists
     result = await db.execute(select(Task).filter_by(id=task_id))
     task = result.scalar_one_or_none()
@@ -39,7 +45,7 @@ async def create_submission(
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_msg)
 
-    # Upload to MinIO
+    # Upload to S3
     content_type = file.content_type or "application/octet-stream"
     file_key = upload_file(file_data, filename, content_type)
 
@@ -150,3 +156,227 @@ async def get_submission_grade(submission_id: str, db: AsyncSession = Depends(ge
         latency_ms=grade.latency_ms,
     )
     return ApiResponse(data=response)
+
+
+# ── Bulk Upload ──
+
+def _generate_student_id_from_filename(filename: str, index: int) -> str:
+    """
+    Generate a student ID from the filename.
+    Examples:
+        'physics_answer_rahul.pdf' → 'STUDENT-RAHUL'
+        'answer_sheet_42.jpg' → 'STUDENT-42'
+        'scan001.pdf' → 'STUDENT-001'
+    Falls back to index-based ID if no useful text found.
+    """
+    # Remove extension
+    name = filename.rsplit(".", 1)[0] if "." in filename else filename
+
+    # Remove common prefixes
+    for prefix in ["answer_sheet_", "answer_", "submission_", "scan", "sheet_"]:
+        if name.lower().startswith(prefix):
+            name = name[len(prefix):]
+
+    # Clean up: remove underscores/hyphens, take the meaningful part
+    name = name.strip("_- ")
+
+    if name and len(name) <= 50:
+        # Sanitize: keep only alphanumeric and hyphens
+        clean = re.sub(r"[^a-zA-Z0-9\-]", "-", name).strip("-").upper()
+        if clean:
+            return f"STUDENT-{clean}"
+
+    return f"STUDENT-{index + 1:03d}"
+
+
+@router.post("/bulk")
+async def bulk_upload_submissions(
+    task_id: str = Form(...),
+    files: List[UploadFile] = File(...),
+    student_ids: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Upload multiple student answer sheets at once → store in S3 → queue all for parsing.
+
+    Accepts up to 100 files per batch. If student_ids is provided (JSON array or
+    comma-separated), maps them 1:1 to files. Otherwise, auto-generates IDs from filenames.
+    """
+    # Validate batch size
+    if len(files) > 100:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files ({len(files)}). Maximum is 100 per batch."
+        )
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided.")
+
+    # Validate task exists
+    result = await db.execute(select(Task).filter_by(id=task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Parse student IDs
+    sid_list: list[str] = []
+    if student_ids and student_ids.strip():
+        raw = student_ids.strip()
+        # Try JSON array first
+        if raw.startswith("["):
+            try:
+                sid_list = json.loads(raw)
+            except json.JSONDecodeError:
+                sid_list = [s.strip() for s in raw.split(",") if s.strip()]
+        else:
+            sid_list = [s.strip() for s in raw.split(",") if s.strip()]
+
+    submitted = []
+    failed = []
+
+    for idx, upload_file_obj in enumerate(files):
+        file_data = await upload_file_obj.read()
+        filename = upload_file_obj.filename or f"upload_{idx}.pdf"
+
+        # Validate file
+        is_valid, error_msg = validate_file(filename, len(file_data))
+        if not is_valid:
+            failed.append({"file": filename, "error": error_msg})
+            continue
+
+        # Determine student ID
+        if idx < len(sid_list) and sid_list[idx]:
+            student_id = sid_list[idx]
+        else:
+            student_id = _generate_student_id_from_filename(filename, idx)
+
+        # Upload to S3
+        content_type = upload_file_obj.content_type or "application/octet-stream"
+        try:
+            file_key = upload_file(file_data, filename, content_type)
+        except Exception as e:
+            failed.append({"file": filename, "error": f"S3 upload failed: {str(e)}"})
+            continue
+
+        # Determine file type
+        file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "pdf"
+
+        # Create submission record
+        submission = Submission(
+            task_id=task.id,
+            student_id=student_id,
+            file_key=file_key,
+            file_name=filename,
+            file_type=file_type,
+            status="PENDING",
+        )
+        db.add(submission)
+        await db.flush()
+
+        # Queue Celery parse task
+        from app.tasks.parse_submission import parse
+        parse.delay(str(submission.id))
+
+        submitted.append({
+            "submission_id": str(submission.id),
+            "student_id": student_id,
+            "file_name": filename,
+        })
+
+    return ApiResponse(data={
+        "submitted": len(submitted),
+        "failed": len(failed),
+        "total_files": len(files),
+        "submissions": submitted,
+        "errors": failed,
+        "message": f"{len(submitted)} answer sheets queued for parsing"
+            + (f", {len(failed)} failed" if failed else ""),
+    })
+
+
+class BulkGradeRequest(BaseModel):
+    """Request to start grading all parsed submissions for a task."""
+    task_id: str
+    description: str = ""
+    temperature: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+@router.post("/bulk-grade")
+async def bulk_grade_submissions(
+    payload: BulkGradeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Convenience endpoint: create a grading run and immediately start grading
+    all PARSED submissions for the given task. Combines POST /runs + POST /runs/{id}/start.
+    """
+    # Validate task exists
+    result = await db.execute(select(Task).filter_by(id=payload.task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Get active rubric
+    rubric_result = await db.execute(
+        select(TaskRubric).filter_by(task_id=task.id, is_active=True)
+        .order_by(TaskRubric.created_at.desc()).limit(1)
+    )
+    rubric = rubric_result.scalar_one_or_none()
+    if not rubric:
+        raise HTTPException(status_code=400, detail="No active rubric found for this task.")
+
+    # Count parsed submissions
+    sub_result = await db.execute(
+        select(Submission).filter_by(task_id=task.id, status="PARSED")
+    )
+    submissions = sub_result.scalars().all()
+
+    if not submissions:
+        # Check if there are any pending/parsing submissions
+        pending_result = await db.execute(
+            select(Submission).filter_by(task_id=task.id)
+            .filter(Submission.status.in_(["PENDING", "PARSING"]))
+        )
+        pending = pending_result.scalars().all()
+        if pending:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{len(pending)} submissions are still being parsed. Wait for parsing to complete."
+            )
+        raise HTTPException(status_code=400, detail="No parsed submissions to grade.")
+
+    # Create grading run
+    model = settings.GEMINI_MODEL
+    run = GradingRun(
+        task_id=task.id,
+        rubric_version=rubric.version,
+        model=model,
+        temperature=payload.temperature,
+        description=payload.description or f"Bulk grading - {len(submissions)} submissions",
+        status="RUNNING",
+        total_submissions=len(submissions),
+        graded_count=0,
+        failed_count=0,
+    )
+    db.add(run)
+    await db.flush()
+
+    # Enqueue grading tasks
+    from app.tasks.grade_submission import grade, finalize_run
+    from celery import chord
+
+    grade_tasks = [grade.s(str(sub.id), str(run.id)) for sub in submissions]
+    callback = finalize_run.si(str(run.id))
+    chord(grade_tasks)(callback)
+
+    return ApiResponse(data={
+        "run_id": str(run.id),
+        "task_id": str(task.id),
+        "status": "RUNNING",
+        "submissions_queued": len(submissions),
+        "rubric_version": rubric.version,
+        "message": f"Grading started for {len(submissions)} submissions",
+    })
+
