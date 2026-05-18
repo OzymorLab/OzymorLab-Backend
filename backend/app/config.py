@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = ""
     SUPABASE_ANON_KEY: str = ""
     SUPABASE_JWT_SECRET: str = ""  # Symmetric verification fallback key
+    SUPABASE_STORAGE_BUCKET: str = "aios-submissions"
 
     # ── Rate Limiting ──
     RATE_LIMIT_DEFAULT: str = "60/minute"

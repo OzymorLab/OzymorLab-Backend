@@ -1,50 +1,24 @@
 """
-Ingestion service — handles file upload to AWS S3.
+Ingestion service — handles file upload and storage via Supabase Storage.
 """
 import uuid
 import logging
-import boto3
-from botocore.exceptions import ClientError
+import requests
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-
-def get_s3_client():
-    """Create an AWS S3 client instance."""
-    return boto3.client(
-        "s3",
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        region_name=settings.AWS_REGION,
-    )
+ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 
 
 def ensure_bucket_exists(client=None) -> None:
-    """Create the S3 bucket if it doesn't exist."""
-    client = client or get_s3_client()
-    bucket = settings.S3_BUCKET
-    try:
-        client.head_bucket(Bucket=bucket)
-    except ClientError as e:
-        error_code = e.response["Error"]["Code"]
-        if error_code == "404":
-            logger.info(f"Bucket {bucket} does not exist. Creating it...")
-            if settings.AWS_REGION == "us-east-1":
-                client.create_bucket(Bucket=bucket)
-            else:
-                client.create_bucket(
-                    Bucket=bucket,
-                    CreateBucketConfiguration={"LocationConstraint": settings.AWS_REGION},
-                )
-        else:
-            logger.error(f"Error checking bucket {bucket}: {e}")
-            raise
-
-
-ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
+    """
+    Bucket validation helper.
+    For Supabase Storage, we expect the bucket to be pre-created in the Supabase Dashboard.
+    """
+    logger.info(f"Using Supabase Storage Bucket: '{settings.SUPABASE_STORAGE_BUCKET}'")
 
 
 def validate_file(filename: str, file_size: int) -> tuple[bool, str | None]:
@@ -59,7 +33,7 @@ def validate_file(filename: str, file_size: int) -> tuple[bool, str | None]:
 
 def upload_file(file_data: bytes, filename: str, content_type: str) -> str:
     """
-    Upload a file to AWS S3 and return the object key.
+    Upload a file to Supabase Storage and return the object key.
 
     Args:
         file_data: Raw file bytes
@@ -67,63 +41,95 @@ def upload_file(file_data: bytes, filename: str, content_type: str) -> str:
         content_type: MIME type
 
     Returns:
-        object_key: S3 object key for retrieval
+        object_key: Supabase object path/key for retrieval
     """
-    client = get_s3_client()
-    ensure_bucket_exists(client)
-
     # Generate unique object key
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
     object_key = f"submissions/{uuid.uuid4()}.{ext}"
 
-    # Upload to S3
-    client.put_object(
-        Bucket=settings.S3_BUCKET,
-        Key=object_key,
-        Body=file_data,
-        ContentType=content_type,
-    )
+    url = f"{settings.SUPABASE_URL}/storage/v1/object/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
+    headers = {
+        "Authorization": f"Bearer {settings.SUPABASE_ANON_KEY}",
+        "Content-Type": content_type
+    }
+
+    # Upload using HTTP POST (or PUT fallback if there are conflicts)
+    response = requests.post(url, data=file_data, headers=headers)
+    if response.status_code not in (200, 201):
+        # Fallback to PUT
+        response = requests.put(url, data=file_data, headers=headers)
+
+    if response.status_code not in (200, 201):
+        logger.error(f"Supabase storage upload failed ({response.status_code}): {response.text}")
+        raise Exception(f"Failed to upload file to Supabase Storage: {response.text}")
 
     return object_key
 
 
 def download_file(object_key: str) -> bytes:
-    """Download a file from AWS S3 by its object key."""
-    client = get_s3_client()
-    response = client.get_object(Bucket=settings.S3_BUCKET, Key=object_key)
-    return response["Body"].read()
+    """Download a file from Supabase Storage by its object key."""
+    url = f"{settings.SUPABASE_URL}/storage/v1/object/authenticated/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
+    headers = {
+        "Authorization": f"Bearer {settings.SUPABASE_ANON_KEY}",
+    }
+    
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        logger.error(f"Supabase storage download failed ({response.status_code}): {response.text}")
+        raise Exception(f"Failed to download file from Supabase Storage: {response.text}")
+        
+    return response.content
 
 
 def delete_file(object_key: str) -> None:
-    """Delete a file from AWS S3."""
-    client = get_s3_client()
+    """Delete a file from Supabase Storage."""
+    url = f"{settings.SUPABASE_URL}/storage/v1/object/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
+    headers = {
+        "Authorization": f"Bearer {settings.SUPABASE_ANON_KEY}",
+    }
+    
     try:
-        client.delete_object(Bucket=settings.S3_BUCKET, Key=object_key)
-    except ClientError as e:
-        logger.error(f"Failed to delete file {object_key}: {e}")
+        response = requests.delete(url, headers=headers)
+        if response.status_code not in (200, 204):
+            logger.warning(f"Failed to delete file {object_key} from Supabase: {response.text}")
+    except Exception as e:
+        logger.error(f"Failed to delete file {object_key} from Supabase: {e}")
 
 
 def generate_presigned_url(object_key: str, expiry_seconds: int = 3600) -> str:
     """
-    Generate a presigned URL for an S3 object.
-    Used by the DEIS Diagram-marker to download submission images
-    without requiring AWS credentials.
+    Generate a signed URL for a Supabase Storage object.
+    Used by the DEIS Diagram-marker to download submission images.
 
     Args:
-        object_key: S3 object key
+        object_key: Supabase object path/key
         expiry_seconds: URL validity period (default 1 hour)
 
     Returns:
-        Presigned URL string
+        Fully qualified signed URL string
     """
-    client = get_s3_client()
+    url = f"{settings.SUPABASE_URL}/storage/v1/object/sign/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
+    headers = {
+        "Authorization": f"Bearer {settings.SUPABASE_ANON_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {"expiresIn": expiry_seconds}
+
     try:
-        url = client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": settings.S3_BUCKET, "Key": object_key},
-            ExpiresIn=expiry_seconds,
-        )
-        return url
-    except ClientError as e:
-        logger.error(f"Failed to generate presigned URL for {object_key}: {e}")
+        response = requests.post(url, json=payload, headers=headers)
+        if response.status_code != 200:
+            logger.error(f"Failed to create signed URL from Supabase ({response.status_code}): {response.text}")
+            raise Exception(f"Failed to generate Supabase signed URL: {response.text}")
+
+        data = response.json()
+        signed_path = data.get("signedURL") or data.get("signedUrl")
+        if not signed_path:
+            raise Exception("Supabase signed URL response missing path")
+
+        # If relative, construct the absolute URL
+        if signed_path.startswith("/"):
+            return f"{settings.SUPABASE_URL}{signed_path}"
+        return signed_path
+    except Exception as e:
+        logger.error(f"Failed to generate signed URL for {object_key}: {e}")
         raise

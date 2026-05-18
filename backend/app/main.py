@@ -46,13 +46,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
 
-    # Ensure S3 bucket exists (if possible with current credentials)
+    # Ensure Supabase Storage bucket is ready
     try:
         from app.services.ingestion import ensure_bucket_exists
         ensure_bucket_exists()
-        logger.info(f"S3 bucket '{settings.S3_BUCKET}' ready")
+        logger.info(f"Supabase Storage bucket '{settings.SUPABASE_STORAGE_BUCKET}' configured")
     except Exception as e:
-        logger.warning(f"S3 bucket check failed (ensure it exists in AWS): {e}")
+        logger.warning(f"Supabase Storage bucket check failed: {e}")
 
     logger.info("AIOS Backend ready!")
     yield
