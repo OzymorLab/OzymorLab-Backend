@@ -10,11 +10,12 @@ class Settings(BaseSettings):
     # ── App ──
     APP_ENV: str = "development"
     APP_VERSION: str = "0.1.0"
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8000"
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8000,https://edeziav2.vercel.app"
 
     # ── Database ──
     DATABASE_URL: str = "postgresql+asyncpg://aios:aios_secret@postgres:5432/aios"
     DATABASE_URL_SYNC: str = "postgresql://aios:aios_secret@postgres:5432/aios"
+    DIRECT_URL: str = ""
 
     # ── Redis ──
     REDIS_URL: str = "redis://redis:6379/0"
@@ -54,6 +55,11 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # ── Supabase Integration ──
+    SUPABASE_URL: str = ""
+    SUPABASE_ANON_KEY: str = ""
+    SUPABASE_JWT_SECRET: str = ""  # Symmetric verification fallback key
 
     # ── Rate Limiting ──
     RATE_LIMIT_DEFAULT: str = "60/minute"

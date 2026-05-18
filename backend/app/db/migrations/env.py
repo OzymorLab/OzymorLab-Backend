@@ -16,8 +16,13 @@ from app.db import models  # noqa: F401
 
 config = context.config
 
-# Override sqlalchemy.url with the actual DATABASE_URL
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Override sqlalchemy.url with DIRECT_URL or DATABASE_URL, converted to asyncpg
+db_url = settings.DIRECT_URL or settings.DATABASE_URL
+if db_url.startswith("postgresql://"):
+    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+# Escape '%' to '%%' for configparser interpolation safety
+db_url = db_url.replace("%", "%%")
+config.set_main_option("sqlalchemy.url", db_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
