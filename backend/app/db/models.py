@@ -26,6 +26,37 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+import base64
+
+import hashlib
+from cryptography.fernet import Fernet
+from app.config import settings
+
+def get_fernet() -> Fernet:
+    secret = settings.JWT_SECRET_KEY or "edexia-secret-change-me-in-production"
+    key_bytes = hashlib.sha256(secret.encode()).digest()
+    fernet_key = base64.urlsafe_b64encode(key_bytes)
+    return Fernet(fernet_key)
+
+def encrypt_key(raw_key: str) -> str:
+    if not raw_key:
+        return None
+    try:
+        f = get_fernet()
+        return f.encrypt(raw_key.encode()).decode()
+    except Exception:
+        return raw_key
+
+def decrypt_key(encrypted_key: str) -> str:
+    if not encrypted_key:
+        return None
+    try:
+        f = get_fernet()
+        return f.decrypt(encrypted_key.encode()).decode()
+    except Exception:
+        return encrypted_key
+
+
 class User(Base):
     """User account — teachers, evaluators, admins."""
     __tablename__ = "users"
@@ -36,15 +67,34 @@ class User(Base):
     full_name = Column(String(255), nullable=False)
     role = Column(String(20), nullable=False, default="teacher")
     # teacher | admin | evaluator
-    gemini_api_key = Column(Text, nullable=True)  # BYOK — user's own Gemini key
+    
+    # Map the column to a private attribute to enable automatic encryption/decryption
+    _gemini_api_key = Column("gemini_api_key", Text, nullable=True)
+    
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    @property
+    def gemini_api_key(self) -> str:
+        """Transparently decrypt the API key when read."""
+        if not self._gemini_api_key:
+            return None
+        return decrypt_key(self._gemini_api_key)
+
+    @gemini_api_key.setter
+    def gemini_api_key(self, value: str):
+        """Transparently encrypt the API key when written."""
+        if not value:
+            self._gemini_api_key = None
+        else:
+            self._gemini_api_key = encrypt_key(value)
 
     __table_args__ = (
         Index("idx_users_email", "email", unique=True),
         Index("idx_users_role", "role"),
     )
+
 
 
 class Task(Base):
