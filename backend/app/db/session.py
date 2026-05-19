@@ -16,11 +16,11 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.APP_ENV == "development",
     connect_args=connect_args,
-    prepared_statement_cache_size=0,
     pool_size=10,
     max_overflow=20,
     pool_pre_ping=True,
 )
+
 
 
 # Async session factory
