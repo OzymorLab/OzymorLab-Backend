@@ -188,6 +188,9 @@ async def set_gemini_key(
 ):
     """Set or update the user's BYOK Gemini API key."""
     current_user.gemini_api_key = payload.gemini_api_key
+    db.add(current_user)
+    await db.commit()
+    await db.refresh(current_user)
     logger.info(f"User {current_user.email} updated their Gemini API key")
 
     return ApiResponse(data={
@@ -203,9 +206,13 @@ async def delete_gemini_key(
 ):
     """Remove the user's stored Gemini API key. System key will be used instead."""
     current_user.gemini_api_key = None
+    db.add(current_user)
+    await db.commit()
+    await db.refresh(current_user)
     logger.info(f"User {current_user.email} removed their Gemini API key")
 
     return ApiResponse(data={
         "message": "Gemini API key removed. System key will be used for grading.",
         "has_gemini_key": False,
     })
+
