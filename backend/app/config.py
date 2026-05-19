@@ -75,3 +75,25 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# ── PgBouncer Connection String Sanitization ──
+# Strip pgbouncer query parameters from the database connection strings.
+# This prevents asyncpg and psycopg2 from throwing TypeError: connect() got an unexpected keyword argument 'pgbouncer'
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+def _strip_pgbouncer(url_str: str) -> str:
+    if not url_str or "pgbouncer" not in url_str:
+        return url_str
+    try:
+        parsed = urlparse(url_str)
+        query_params = parse_qs(parsed.query)
+        query_params.pop("pgbouncer", None)
+        new_query = urlencode(query_params, doseq=True)
+        parsed = parsed._replace(query=new_query)
+        return urlunparse(parsed)
+    except Exception:
+        return url_str
+
+settings.DATABASE_URL = _strip_pgbouncer(settings.DATABASE_URL)
+settings.DATABASE_URL_SYNC = _strip_pgbouncer(settings.DATABASE_URL_SYNC)
+
