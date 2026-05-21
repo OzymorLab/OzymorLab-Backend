@@ -353,9 +353,14 @@ class BulkGradeRequest(BaseModel):
     temperature: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
+from fastapi import Request
+from app.utils.idempotency import idempotent
+
 @router.post("/bulk-grade")
+@idempotent()
 async def bulk_grade_submissions(
     payload: BulkGradeRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
