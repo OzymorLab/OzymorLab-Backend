@@ -15,10 +15,48 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.db.session import get_db
-from app.db.models import GradeResult, Submission, Task, User
-from app.services.auth_service import get_current_user
+from app.db.models import GradeResult, Submission, Task, User, GradingRun, ExamCycle
+from app.schemas.common import ApiResponse
+from app.services.auth_service import get_current_user, require_role
 
-router = APIRouter(prefix="/reviews", tags=["Reviews"])
+router = APIRouter(
+    prefix="/reviews", 
+    tags=["Reviews"],
+    dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal"]))]
+)
+
+
+def _scope_review_query_by_role(query, user: User):
+    """
+    Apply role-based filtering to review queries for tenant isolation.
+
+    - teacher: Only sees reviews for tasks whose grading runs they created.
+    - hod: Sees reviews for all tasks in their school.
+    - principal/admin: Sees all reviews in their school.
+    - No school_id: Sees all reviews (legacy/standalone mode).
+    """
+    if not user.school_id:
+        # Legacy standalone teacher — no school scoping
+        return query
+
+    if user.role == "teacher":
+        # Teacher only sees reviews for tasks they triggered grading on
+        query = (
+            query
+            .join(GradingRun, GradeResult.grading_run_id == GradingRun.id)
+            .filter(GradingRun.created_by == user.id)
+        )
+    elif user.role in ("hod", "principal", "admin"):
+        # HOD/Principal/Admin sees reviews for tasks in their school
+        # Scope via exam_cycle → school, or via the grading run creator's school
+        query = (
+            query
+            .join(GradingRun, GradeResult.grading_run_id == GradingRun.id)
+            .outerjoin(User, GradingRun.created_by == User.id)
+            .filter(User.school_id == user.school_id)
+        )
+
+    return query
 
 
 # ── Request/Response Schemas ──
@@ -82,6 +120,9 @@ async def list_pending_reviews(
 ):
     """
     List all submissions flagged for human review.
+    Results are scoped by the current user's role:
+    - Teacher: only their own tasks' reviews.
+    - HOD/Principal/Admin: all reviews in their school.
     Optionally filter by task_id.
     """
     query = (
@@ -95,6 +136,9 @@ async def list_pending_reviews(
     if task_id:
         query = query.filter(Submission.task_id == task_id)
 
+    # Apply role-based scoping
+    query = _scope_review_query_by_role(query, current_user)
+
     result = await db.execute(query)
     rows = result.all()
 
@@ -102,7 +146,7 @@ async def list_pending_reviews(
     for grade_result, submission, task in rows:
         items.append(ReviewItemResponse(
             submission_id=str(submission.id),
-            student_id=submission.student_id,
+            student_id=str(submission.student_id) if submission.student_id else "N/A",
             task_title=task.title,
             grade=grade_result.grade,
             max_grade=grade_result.max_grade,
@@ -185,6 +229,8 @@ async def approve_grade(
     grade_result.review_notes = payload.notes or "Approved by human reviewer"
     grade_result.reviewed_at = datetime.now(timezone.utc)
 
+    await db.commit()
+
     return {
         "data": {
             "submission_id": submission_id,
@@ -232,6 +278,8 @@ async def override_grade(
     grade_result.reviewed_by = payload.reviewer_id
     grade_result.review_notes = payload.notes
     grade_result.reviewed_at = datetime.now(timezone.utc)
+
+    await db.commit()
 
     return {
         "data": {

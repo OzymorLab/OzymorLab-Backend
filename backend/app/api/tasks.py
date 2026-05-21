@@ -11,9 +11,13 @@ from app.db.models import Task, TaskRubric, GradingAlert, User
 from app.schemas.common import ApiResponse
 from app.schemas.rubric import TaskCreate, TaskResponse, TaskRubricCreate, TaskRubricResponse
 from app.schemas.observability import GradingAlertResponse, SetBaselineRequest
-from app.services.auth_service import get_current_user
+from app.services.auth_service import get_current_user, require_role
 
-router = APIRouter(prefix="/tasks", tags=["Tasks"])
+router = APIRouter(
+    prefix="/tasks", 
+    tags=["Tasks"],
+    dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal"]))]
+)
 
 
 @router.post("")

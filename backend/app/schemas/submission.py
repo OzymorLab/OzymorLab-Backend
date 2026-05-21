@@ -31,7 +31,7 @@ class SubmissionResponse(BaseModel):
     """Full submission response with parsed content."""
     id: str
     task_id: str
-    student_id: str
+    student_id: str | None = None
     file_name: str | None
     file_type: str | None
     status: str
@@ -48,7 +48,7 @@ class SubmissionListResponse(BaseModel):
     """Minimal submission info for list views."""
     id: str
     task_id: str
-    student_id: str
+    student_id: str | None = None
     file_name: str | None
     status: str
     created_at: str

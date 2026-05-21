@@ -44,6 +44,33 @@ def parse(self, submission_id: str):
         # Run the 3-pass parsing pipeline
         raw_text, parsed_content = parse_submission(file_data, file_type)
 
+        # Fix B5: Diagram Image Extraction
+        # If there are diagrams and it's a PDF, extract the first page as an image for DEIS
+        diagram_file_key = None
+        if parsed_content.get("has_diagrams") and file_type.lower() == "pdf":
+            try:
+                import fitz
+                import io
+                from app.services.ingestion import upload_file_obj
+                
+                doc = fitz.open(stream=file_data, filetype="pdf")
+                if len(doc) > 0:
+                    page = doc[0]
+                    # Render at 2x resolution
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                    img_bytes = pix.tobytes("png")
+                    
+                    # Upload the image crop to S3
+                    img_file = io.BytesIO(img_bytes)
+                    diagram_file_key = upload_file_obj(img_file, f"diagram_crops/{submission_id}.png")
+                    logger.info(f"Extracted diagram image for DEIS: {diagram_file_key}")
+                doc.close()
+            except Exception as e:
+                logger.error(f"Failed to extract diagram image from PDF: {e}")
+        
+        if diagram_file_key:
+            parsed_content["diagram_file_key"] = diagram_file_key
+
         # Update submission with parsed results
         submission.raw_text = raw_text
         submission.parsed_content = parsed_content
