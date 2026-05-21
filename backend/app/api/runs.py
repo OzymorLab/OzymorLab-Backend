@@ -224,3 +224,58 @@ async def get_run_drift(run_id: str, db: AsyncSession = Depends(get_db), current
         details=report.details, created_at=report.created_at.isoformat(),
     )
     return ApiResponse(data=response)
+
+
+import asyncio
+import json
+from fastapi.responses import StreamingResponse
+
+@router.get("/{run_id}/events")
+async def run_events_stream(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Server-Sent Events (SSE) progress engine streaming grading queue metrics in real time.
+    """
+    async def event_generator():
+        while True:
+            try:
+                # Retrieve fresh status from DB
+                result = await db.execute(select(GradingRun).filter_by(id=run_id))
+                run = result.scalar_one_or_none()
+
+                if not run:
+                    yield f"data: {json.dumps({'error': 'Grading run not found'})}\n\n"
+                    break
+
+                total = run.total_submissions or 0
+                graded = run.graded_count or 0
+                failed = run.failed_count or 0
+                processed = graded + failed
+
+                progress = round((processed / total) * 100 if total > 0 else 0, 2)
+
+                payload = {
+                    "run_id": str(run.id),
+                    "status": run.status,
+                    "total_submissions": total,
+                    "graded_count": graded,
+                    "failed_count": failed,
+                    "progress_percentage": progress,
+                }
+
+                yield f"data: {json.dumps(payload)}\n\n"
+
+                if run.status in ["COMPLETED", "FAILED"] or (total > 0 and processed >= total):
+                    break
+
+                await asyncio.sleep(2)
+                db.expire_all()
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                break
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+

@@ -15,7 +15,6 @@ from app.db.models import Task, TaskRubric, User
 from app.schemas.common import ApiResponse
 from app.schemas.rubric import RubricStep, TaskRubricCreate, TaskResponse, TaskRubricResponse
 from app.services.ingestion import validate_file, upload_file
-from app.schemas.rubric import QuestionPaperResponse, RubricDraftResponse, RubricConfirmRequest
 from app.services.auth_service import get_current_user, require_role
 
 router = APIRouter(

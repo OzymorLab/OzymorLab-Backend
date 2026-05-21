@@ -397,3 +397,16 @@ class LLMCallLog(Base):
         Index("idx_llm_calls_submission_id", "submission_id"),
         Index("idx_llm_calls_run_id", "grading_run_id"),
     )
+
+
+class IdempotencyKey(Base):
+    """Tracks idempotency signatures to guarantee safe API retries and transaction stability."""
+    __tablename__ = "idempotency_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    key_hash = Column(String(64), unique=True, nullable=False, index=True)
+    status = Column(String(20), default="PROCESSING")  # PROCESSING | SUCCESS | FAILED
+    response_code = Column(Integer, nullable=True)
+    response_body = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
