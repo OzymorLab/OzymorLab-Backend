@@ -187,6 +187,7 @@ class GradingRun(Base):
     total_submissions = Column(Integer, default=0)
     graded_count = Column(Integer, default=0)
     failed_count = Column(Integer, default=0)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)  # who triggered this run (for BYOK key lookup)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     completed_at = Column(DateTime(timezone=True), nullable=True)
 

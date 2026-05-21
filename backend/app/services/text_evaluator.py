@@ -75,6 +75,7 @@ def grade_single_step(
     subject: str = "General",
     board: str = "Generic",
     grade_level: str = "Unknown",
+    api_key: str | None = None,
 ) -> dict:
     """
     Grade a single rubric step using the hybrid SymPy + LLM pipeline.
@@ -108,6 +109,7 @@ def grade_single_step(
         system_prompt=system_prompt,
         temperature=temperature,
         call_type="step_grading",
+        api_key=api_key,
     )
 
     if not result["success"]:
@@ -173,6 +175,7 @@ def evaluate_text_component(
     subject: str = "General",
     board: str = "Generic",
     grade_level: str = "Unknown",
+    api_key: str | None = None,
 ) -> dict:
     """
     Evaluate a text-type component. Main entry point for the Text Pipeline.
@@ -264,7 +267,7 @@ def evaluate_text_component(
         # LLM grading
         step_result = grade_single_step(
             rubric_step, student_step, sympy_result, board_notes, temperature,
-            subject=subject, board=board, grade_level=grade_level,
+            subject=subject, board=board, grade_level=grade_level, api_key=api_key,
         )
         step_grades.append(step_result)
 

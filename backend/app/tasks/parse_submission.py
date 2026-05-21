@@ -14,10 +14,7 @@ from app.services.parsing import parse_submission
 logger = logging.getLogger(__name__)
 
 
-def get_sync_session() -> Session:
-    """Create a synchronous DB session for Celery tasks."""
-    engine = create_engine(settings.DATABASE_URL_SYNC)
-    return Session(engine)
+from app.db.session import get_sync_session
 
 
 @celery_app.task(bind=True, name="app.tasks.parse_submission.parse", max_retries=2)

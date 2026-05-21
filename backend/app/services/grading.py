@@ -116,6 +116,7 @@ def grade_submission(
                 subject=subject,
                 board=board,
                 grade_level=grade_level,
+                api_key=user_gemini_key,
             )
             component_results.append(result)
 
@@ -173,6 +174,7 @@ def grade_submission(
                 subject=subject,
                 board=board,
                 grade_level=grade_level,
+                api_key=user_gemini_key,
             )
             component_results.append(result)
 
@@ -187,6 +189,7 @@ def grade_submission(
                 subject=subject,
                 board=board,
                 grade_level=grade_level,
+                api_key=user_gemini_key,
             )
             component_results.append(result)
 

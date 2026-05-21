@@ -31,7 +31,7 @@ def validate_file(filename: str, file_size: int) -> tuple[bool, str | None]:
     return True, None
 
 
-def upload_file(file_data: bytes, filename: str, content_type: str) -> str:
+def upload_file(file_data: bytes, filename: str, content_type: str, folder: str = "submissions") -> str:
     """
     Upload a file to Supabase Storage and return the object key.
 
@@ -39,13 +39,14 @@ def upload_file(file_data: bytes, filename: str, content_type: str) -> str:
         file_data: Raw file bytes
         filename: Original filename
         content_type: MIME type
+        folder: Storage folder/prefix (default "submissions")
 
     Returns:
         object_key: Supabase object path/key for retrieval
     """
     # Generate unique object key
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
-    object_key = f"submissions/{uuid.uuid4()}.{ext}"
+    object_key = f"{folder}/{uuid.uuid4()}.{ext}"
 
     url = f"{settings.SUPABASE_URL}/storage/v1/object/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
     headers = {

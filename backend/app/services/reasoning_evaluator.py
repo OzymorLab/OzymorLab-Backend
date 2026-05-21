@@ -40,6 +40,7 @@ def evaluate_reasoning_component(
     subject: str = "General",
     board: str = "Generic",
     grade_level: str = "Unknown",
+    api_key: str | None = None,
 ) -> dict:
     """
     Evaluate a reasoning-type component.
@@ -171,6 +172,7 @@ Return JSON:
             system_prompt=system_prompt,
             temperature=temperature,
             call_type="reasoning_grading",
+            api_key=api_key,
         )
 
         if not result["success"]:

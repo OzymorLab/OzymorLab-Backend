@@ -55,6 +55,7 @@ async def create_run(payload: GradingRunCreate, db: AsyncSession = Depends(get_d
         total_submissions=len(submissions),
         graded_count=0,
         failed_count=0,
+        created_by=current_user.id,
     )
     db.add(run)
     await db.flush()

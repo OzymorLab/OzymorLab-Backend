@@ -16,10 +16,7 @@ from app.services.grading import grade_submission
 logger = logging.getLogger(__name__)
 
 
-def get_sync_session() -> Session:
-    """Create a synchronous DB session for Celery tasks."""
-    engine = create_engine(settings.DATABASE_URL_SYNC)
-    return Session(engine)
+from app.db.session import get_sync_session
 
 
 @celery_app.task(bind=True, name="app.tasks.grade_submission.grade", max_retries=1)
@@ -27,7 +24,7 @@ def grade(self, submission_id: str, grading_run_id: str):
     """
     Grade a single submission as part of a grading run.
     """
-    from app.db.models import Submission, GradingRun, GradeResult, TaskRubric
+    from app.db.models import Submission, GradingRun, GradeResult, TaskRubric, Task
 
     session = get_sync_session()
     try:

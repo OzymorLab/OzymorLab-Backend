@@ -18,7 +18,10 @@ logger = logging.getLogger(__name__)
 def extract_text_from_pdf(file_data: bytes) -> str:
     """
     Extract text from a PDF file using PyMuPDF.
-    Fast (~50ms per page), works well for digital/typed PDFs.
+    Fast (~50ms per page) for digital/typed PDFs.
+
+    For scanned PDFs (pages with no extractable text), renders the page
+    as an image and falls back to Gemini Vision OCR for transcription.
     """
     text_parts = []
     try:
@@ -28,10 +31,31 @@ def extract_text_from_pdf(file_data: bytes) -> str:
             text = page.get_text("text")
             if text.strip():
                 text_parts.append(text)
-                # Fallback: if no text, PyMuPDF can extract the image bytes
-                # but for MVP, we will just continue. If it's a scanned PDF, 
-                # we should really pass the page image to Gemini.
-                pass
+            else:
+                # ── Scanned PDF fallback: render page as image → Gemini Vision OCR ──
+                logger.info(
+                    f"Page {page_num + 1} has no extractable text. "
+                    f"Rendering as image for Gemini Vision OCR fallback."
+                )
+                try:
+                    # Render page at 2x resolution for better OCR accuracy
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                    image_bytes = pix.tobytes("png")
+                    ocr_text = extract_text_from_image_gemini(image_bytes)
+                    if ocr_text and ocr_text.strip():
+                        text_parts.append(ocr_text)
+                        logger.info(
+                            f"Page {page_num + 1} OCR fallback extracted "
+                            f"{len(ocr_text)} characters."
+                        )
+                    else:
+                        logger.warning(
+                            f"Page {page_num + 1} OCR fallback returned empty text."
+                        )
+                except Exception as ocr_err:
+                    logger.error(
+                        f"Gemini Vision OCR fallback failed for page {page_num + 1}: {ocr_err}"
+                    )
         doc.close()
     except Exception as e:
         logger.error(f"PDF text extraction failed: {e}")

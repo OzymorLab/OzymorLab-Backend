@@ -359,6 +359,7 @@ async def bulk_grade_submissions(
         total_submissions=len(submissions),
         graded_count=0,
         failed_count=0,
+        created_by=current_user.id,
     )
     db.add(run)
     await db.flush()

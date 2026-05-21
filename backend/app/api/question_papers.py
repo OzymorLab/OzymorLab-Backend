@@ -82,24 +82,18 @@ async def upload_question_paper(
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_msg)
 
-    # Upload question paper to S3
+    # Upload question paper to Supabase Storage in 'qpapers' folder
     content_type = file.content_type or "application/octet-stream"
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "pdf"
+    from app.services.ingestion import upload_file
 
-    # Upload to a dedicated qpapers/ prefix
-    from app.services.ingestion import get_s3_client, ensure_bucket_exists
-    from app.config import settings
-    import uuid as uuid_mod
-
-    s3_client = get_s3_client()
-    ensure_bucket_exists(s3_client)
-    qpaper_key = f"qpapers/{uuid_mod.uuid4()}.{ext}"
-    s3_client.put_object(
-        Bucket=settings.S3_BUCKET,
-        Key=qpaper_key,
-        Body=file_data,
-        ContentType=content_type,
-    )
+    try:
+        qpaper_key = upload_file(file_data, filename, content_type, folder="qpapers")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload question paper to Supabase Storage: {str(e)}"
+        )
 
     # Determine file type for parsing
     file_type = ext if ext in ("pdf", "png", "jpg", "jpeg") else "pdf"

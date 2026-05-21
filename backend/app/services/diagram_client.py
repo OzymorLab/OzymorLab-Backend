@@ -208,6 +208,7 @@ def evaluate_diagram_step(
             "sympy_error": None,
             "deis_task_id": deis_task_id,
             "deis_confidence": confidence,
+            "_deis_raw": deis_result,  # Preserve raw DEIS payload for label pipeline
         }
 
     except DiagramEvaluationError as e:
@@ -224,4 +225,5 @@ def evaluate_diagram_step(
             "error_type": "diagram_eval_failed",
             "sympy_valid": None,
             "sympy_error": None,
+            "_deis_raw": None,  # No raw result available on failure
         }
