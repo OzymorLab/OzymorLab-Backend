@@ -57,6 +57,82 @@ def decrypt_key(encrypted_key: str) -> str:
         return encrypted_key
 
 
+class School(Base):
+    """A school entity that holds users (teachers/admins) and classes."""
+    __tablename__ = "schools"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    
+    users = relationship("User", back_populates="school", cascade="all, delete-orphan")
+    classes = relationship("SchoolClass", back_populates="school", cascade="all, delete-orphan")
+    exam_cycles = relationship("ExamCycle", back_populates="school", cascade="all, delete-orphan")
+
+
+class ExamCycle(Base):
+    """Groups multiple subject papers into a single exam event (e.g., 'Mid-Term Oct 2026')."""
+    __tablename__ = "exam_cycles"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    school_id = Column(UUID(as_uuid=True), ForeignKey("schools.id"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)  # e.g., "Mid-Term Oct 2026"
+    start_date = Column(DateTime(timezone=True), nullable=True)
+    end_date = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(20), nullable=False, default="ACTIVE")  # ACTIVE | COMPLETED | ARCHIVED
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    school = relationship("School", back_populates="exam_cycles")
+    tasks = relationship("Task", back_populates="exam_cycle")
+    creator = relationship("User", foreign_keys=[created_by])
+
+    __table_args__ = (
+        Index("idx_exam_cycles_school_id", "school_id"),
+    )
+
+
+class SchoolClass(Base):
+    """A class standard within a school (e.g., 'Grade 10')."""
+    __tablename__ = "classes"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    school_id = Column(UUID(as_uuid=True), ForeignKey("schools.id"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)  # e.g., "X", "XII"
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    
+    school = relationship("School", back_populates="classes")
+    sections = relationship("Section", back_populates="school_class", cascade="all, delete-orphan")
+
+
+class Section(Base):
+    """A specific section within a class (e.g., 'A', 'B')."""
+    __tablename__ = "sections"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    class_id = Column(UUID(as_uuid=True), ForeignKey("classes.id"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)  # e.g., "A", "Science"
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    
+    school_class = relationship("SchoolClass", back_populates="sections")
+    students = relationship("Student", back_populates="section", cascade="all, delete-orphan")
+
+
+class Student(Base):
+    """A student belonging to a specific section."""
+    __tablename__ = "students"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    section_id = Column(UUID(as_uuid=True), ForeignKey("sections.id"), nullable=False, index=True)
+    roll_number = Column(String(50), nullable=False)
+    name = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    
+    section = relationship("Section", back_populates="students")
+    submissions = relationship("Submission", back_populates="student")
+
+
+
 class User(Base):
     """User account — teachers, evaluators, admins."""
     __tablename__ = "users"
@@ -66,7 +142,10 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=False)
     role = Column(String(20), nullable=False, default="teacher")
-    # teacher | admin | evaluator
+    # teacher | admin | evaluator | hod | principal
+    school_id = Column(UUID(as_uuid=True), ForeignKey("schools.id"), nullable=True, index=True)
+    
+    school = relationship("School", back_populates="users")
     
     # Map the column to a private attribute to enable automatic encryption/decryption
     _gemini_api_key = Column("gemini_api_key", Text, nullable=True)
@@ -110,6 +189,9 @@ class Task(Base):
     description = Column(Text, nullable=True)
     question_paper_key = Column(Text, nullable=True)  # S3 object key for uploaded question paper
     baseline_run_id = Column(UUID(as_uuid=True), nullable=True)  # designated drift baseline
+    # Phase 4: Exam cycle and paper set support
+    exam_cycle_id = Column(UUID(as_uuid=True), ForeignKey("exam_cycles.id"), nullable=True, index=True)
+    paper_set = Column(String(10), nullable=True)  # A, B, C, or NULL for standalone tasks
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -118,6 +200,7 @@ class Task(Base):
     submissions = relationship("Submission", back_populates="task", lazy="selectin")
     grading_runs = relationship("GradingRun", back_populates="task", lazy="selectin")
     drift_reports = relationship("DriftReport", back_populates="task", lazy="selectin")
+    exam_cycle = relationship("ExamCycle", back_populates="tasks")
 
 
 class TaskRubric(Base):
@@ -130,13 +213,20 @@ class TaskRubric(Base):
     rubric_json = Column(JSONB, nullable=False)  # full rubric with steps
     grading_notes = Column(Text, nullable=True)  # board-level guidance
     is_active = Column(Boolean, default=True)
+    # Phase 4: Rubric approval workflow
+    approval_status = Column(String(20), nullable=False, default="DRAFT")  # DRAFT | PENDING_APPROVAL | APPROVED | REJECTED
+    approved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    rejection_notes = Column(Text, nullable=True)  # HOD's feedback when rejecting
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     # Relationships
     task = relationship("Task", back_populates="rubrics")
+    approver = relationship("User", foreign_keys=[approved_by])
 
     __table_args__ = (
         Index("idx_task_rubrics_task_version", "task_id", "version", unique=True),
+        Index("idx_task_rubrics_approval_status", "approval_status"),
     )
 
 
@@ -146,7 +236,7 @@ class Submission(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id = Column(UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False)
-    student_id = Column(String(255), nullable=False)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id"), nullable=True, index=True)
     file_key = Column(Text, nullable=False)  # S3 object key
     file_name = Column(String(500), nullable=True)
     file_type = Column(String(20), nullable=True)  # pdf, png, jpg, jpeg
@@ -161,6 +251,7 @@ class Submission(Base):
     # Relationships
     task = relationship("Task", back_populates="submissions")
     grade_results = relationship("GradeResult", back_populates="submission", lazy="selectin")
+    student = relationship("Student", back_populates="submissions")
 
     # Multimodal evaluation
     question_decomposition = Column(JSONB, nullable=True)  # cached decomposition result
@@ -168,7 +259,6 @@ class Submission(Base):
     __table_args__ = (
         Index("idx_submissions_task_id", "task_id"),
         Index("idx_submissions_status", "status"),
-        Index("idx_submissions_student_id", "student_id"),
     )
 
 

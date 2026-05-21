@@ -242,3 +242,21 @@ async def get_current_user(
         )
 
     return user
+
+
+def require_role(allowed_roles: list[str]):
+    """
+    FastAPI dependency factory for Role-Based Access Control (RBAC).
+    Usage:
+        @router.post("/", dependencies=[Depends(require_role(["admin", "principal"]))])
+    """
+    def role_checker(current_user: User = Depends(get_current_user)):
+        if current_user.role not in allowed_roles:
+            logger.warning(f"RBAC Denied: User {current_user.id} ({current_user.role}) attempted to access restricted endpoint requiring {allowed_roles}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Operation not permitted. Required role: {', '.join(allowed_roles)}.",
+            )
+        return current_user
+    
+    return role_checker

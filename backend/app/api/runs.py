@@ -11,9 +11,13 @@ from app.schemas.common import ApiResponse
 from app.schemas.grade import GradingRunCreate, GradingRunResponse, RunStatistics, StepGradeResult, GradeResultResponse
 from app.schemas.observability import DriftReportResponse
 from app.config import settings
-from app.services.auth_service import get_current_user
+from app.services.auth_service import get_current_user, require_role
 
-router = APIRouter(prefix="/runs", tags=["Grading Runs"])
+router = APIRouter(
+    prefix="/runs", 
+    tags=["Grading Runs"],
+    dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal"]))]
+)
 
 
 @router.post("")

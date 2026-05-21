@@ -78,10 +78,10 @@ def evaluate_reasoning_component(
     sympy_results = {}
     for rubric_step in relevant_rubric:
         if rubric_step.get("expected_exprs"):
-            # Find matching student equations
-            student_eqs = []
-            for s in student_steps:
-                student_eqs.extend(s.get("equations", []))
+            # Find matching student equations for THIS step only
+            step_num = rubric_step.get("step_num")
+            student_step = student_steps_by_num.get(step_num)
+            student_eqs = student_step.get("equations", []) if student_step else []
 
             if student_eqs:
                 validations = validate_expected_against_student(

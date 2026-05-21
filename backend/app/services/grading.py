@@ -97,6 +97,16 @@ def grade_submission(
     component_results = []
     deis_result_cache = None  # Cache DEIS result for both diagram and labels
 
+    # Sort components to ensure 'diagram' is processed before 'labels'
+    # Order: diagram -> labels -> text -> reasoning (or similar, just diagram before labels)
+    def component_priority(c):
+        t = c.get("type", "text")
+        if t == "diagram": return 0
+        if t == "labels": return 1
+        return 2
+        
+    components.sort(key=component_priority)
+
     for component in components:
         ctype = component.get("type", "text")
         logger.info(
@@ -130,8 +140,9 @@ def grade_submission(
                     None,
                 )
                 if diagram_rubric_step:
+                    actual_file_key = parsed_content.get("diagram_file_key") or file_key
                     result = evaluate_diagram_step(
-                        file_key=file_key,
+                        file_key=actual_file_key,
                         rubric_step=diagram_rubric_step,
                         question_id=rubric.get("task_id", ""),
                         submission_id=submission_id or "",

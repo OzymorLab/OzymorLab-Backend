@@ -3,9 +3,12 @@ Submissions API — file upload, bulk upload, status tracking, grade retrieval.
 """
 import json
 import re
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+import csv
+import io
+from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -16,16 +19,20 @@ from app.schemas.common import ApiResponse
 from app.schemas.submission import SubmissionResponse, SubmissionUploadResponse, ParsedContent
 from app.schemas.grade import StepGradeResult, GradeResultResponse
 from app.services.ingestion import validate_file, upload_file
-from app.services.auth_service import get_current_user
+from app.services.auth_service import get_current_user, require_role
 from app.config import settings
 
-router = APIRouter(prefix="/submissions", tags=["Submissions"])
+router = APIRouter(
+    prefix="/submissions", 
+    tags=["Submissions"],
+    dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal"]))]
+)
 
 
 @router.post("")
 async def create_submission(
     task_id: str = Form(...),
-    student_id: str = Form(...),
+    student_id: Optional[str] = Form(None),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -52,10 +59,14 @@ async def create_submission(
     # Determine file type
     file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "pdf"
 
+    # Clean up student_id if it's the legacy dummy string
+    if student_id and not student_id.replace('-', '').isalnum() and len(student_id) < 30:
+        student_id = None # Ignore dummy strings, let OCR handle it
+
     # Create submission record
     submission = Submission(
         task_id=task.id,
-        student_id=student_id,
+        student_id=student_id if student_id else None,
         file_key=file_key,
         file_name=filename,
         file_type=file_type,
@@ -64,14 +75,14 @@ async def create_submission(
     db.add(submission)
     await db.flush()
 
-    # Enqueue Celery parse task
-    from app.tasks.parse_submission import parse
-    parse.delay(str(submission.id))
+    # Enqueue Celery Orchestrator task (auto-grading pipeline)
+    from app.tasks.orchestrator import process_submission
+    process_submission.delay(str(submission.id))
 
     return ApiResponse(data=SubmissionUploadResponse(
         submission_id=str(submission.id),
         status="PENDING",
-        message="Submission queued for parsing",
+        message="Submission queued for auto-grading pipeline",
     ))
 
 
@@ -103,10 +114,48 @@ async def get_submission(submission_id: str, db: AsyncSession = Depends(get_db),
     return ApiResponse(data=response)
 
 
+@router.get("/export")
+async def export_submissions_csv(
+    task_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Export graded submissions as a CSV file."""
+    # Query graded submissions for a specific task and eager load grade_results
+    from sqlalchemy.orm import selectinload
+    query = (
+        select(Submission)
+        .options(selectinload(Submission.grade_results))
+        .filter_by(task_id=task_id, status="GRADED")
+        .order_by(Submission.created_at.desc())
+    )
+    result = await db.execute(query)
+    submissions = result.scalars().all()
+
+    # Generate CSV in memory
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Submission ID", "Student ID", "File Name", "Status", "Total Marks", "Created At"])
+
+    for s in submissions:
+        total_marks = sum(r.marks_awarded for r in s.grade_results) if s.grade_results else 0.0
+        writer.writerow([str(s.id), str(s.student_id), s.file_name, s.status, total_marks, s.created_at.isoformat()])
+
+    output.seek(0)
+    
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=export_task_{task_id}.csv"}
+    )
+
+
 @router.get("")
 async def list_submissions(
     task_id: str | None = None,
     status: str | None = None,
+    limit: int = Query(50, ge=1, le=100),
+    skip: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -116,12 +165,14 @@ async def list_submissions(
         query = query.filter_by(task_id=task_id)
     if status:
         query = query.filter_by(status=status)
+        
+    query = query.offset(skip).limit(limit)
 
     result = await db.execute(query)
     submissions = result.scalars().all()
 
     items = [
-        {"id": str(s.id), "task_id": str(s.task_id), "student_id": s.student_id,
+        {"id": str(s.id), "task_id": str(s.task_id), "student_id": str(s.student_id) if s.student_id else None,
          "file_name": s.file_name, "status": s.status, "created_at": s.created_at.isoformat()}
         for s in submissions
     ]
@@ -326,6 +377,14 @@ async def bulk_grade_submissions(
     rubric = rubric_result.scalar_one_or_none()
     if not rubric:
         raise HTTPException(status_code=400, detail="No active rubric found for this task.")
+
+    # Phase 4: Rubric approval gate — only APPROVED rubrics can be used for grading
+    if rubric.approval_status != "APPROVED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Rubric is '{rubric.approval_status}'. Only APPROVED rubrics can be used for grading. "
+                   f"Submit the rubric for HOD approval first.",
+        )
 
     # Count parsed submissions
     sub_result = await db.execute(
