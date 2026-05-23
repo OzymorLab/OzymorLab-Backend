@@ -27,8 +27,24 @@ The repository uses GitHub Actions for continuous integration. On every push and
 3. Injects mock environment variables (e.g., Mock Supabase URLs, Mock Gemini Keys).
 4. Executes the full `PyTest` suite and `Flake8` linting to prevent regressions.
 
-## How it works with the broader system
-1. The **Frontend Dashboard** sends student PDF submissions here, fully authenticated via Supabase JWTs.
-2. The AIOS Backend extracts the text, segments the logic steps, and evaluates the text/math concurrently.
-3. If an educational diagram (like a Physics Circuit or Human Heart) is detected, it is shunted over to the **DEIS (Diagram-Marker)** microservice cluster for heavy GPU evaluation.
-4. Evaluation results are aggregated using a robust Score Fusion engine and presented back to the teacher for final moderation.
+## Integrated Diagram Evaluation System (DEIS)
+The **Diagram Evaluation Intelligence System (DEIS)** is consolidated under `/diagram-marker` and runs as a microservice cluster inside the same Docker Compose network:
+- **`deis-gateway`**: Exposes a fast HTTP polling endpoint (`http://deis-gateway:8001/api/v1/diagram/evaluate`) for submitting images.
+- **`deis-detection`**: A worker loading **YOLOv8** weights to extract bounding boxes for labels, arrows, and regions.
+- **`deis-structural`**: Analyzes arrow-label-region geometries and constructs a directed scene graph.
+- **`deis-scoring`**: Deterministically compares the student's mathematical scene graph against the golden rubric graph using `DiGraphMatcher` for partial scoring.
+
+All services communicate asynchronously using an **Apache Kafka** broker and cache intermediate states/results in the shared **Redis** container.
+
+## Running the Unified Stack
+
+To start all components (PostgreSQL, Redis, AIOS Web Server, Celery Workers, Kafka, Zookeeper, and all DEIS microservices):
+
+```bash
+docker compose up --build
+```
+
+You can verify the components are running:
+- Main Backend API: `http://localhost:8000/docs`
+- DEIS Gateway API: `http://localhost:8001/docs`
+- Grafana: `http://localhost:3001` (admin password configured in `.env`)

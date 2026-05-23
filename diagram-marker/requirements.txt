@@ -1,0 +1,12 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+confluent-kafka==2.3.0
+redis==5.0.1
+pydantic==2.5.2
+ultralytics==8.1.0
+opencv-python-headless==4.9.0.80
+networkx==3.2.1
+numpy==1.26.4
+requests==2.31.0
+pillow==10.2.0
+easyocr==1.7.1
