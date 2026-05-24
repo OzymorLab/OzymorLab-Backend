@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     # ── Supabase Integration ──
     SUPABASE_URL: str = ""
     SUPABASE_ANON_KEY: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""  # Service role key to bypass RLS in backend
     SUPABASE_JWT_SECRET: str = ""  # Symmetric verification fallback key
     SUPABASE_STORAGE_BUCKET: str = "aios-submissions"
 

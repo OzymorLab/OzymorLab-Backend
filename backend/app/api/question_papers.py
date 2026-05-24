@@ -97,7 +97,7 @@ async def upload_question_paper(
 
     user_token = request.headers.get("Authorization")
     try:
-        qpaper_key = upload_file(file_data, filename, content_type, folder="qpapers", user_token=user_token)
+        qpaper_key = upload_file(file_data, filename, content_type, folder="submissions", user_token=user_token)
     except Exception as e:
         raise HTTPException(
             status_code=500,
