@@ -8,7 +8,7 @@ from typing import List, Optional
 import csv
 import io
 from fastapi.responses import StreamingResponse
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -41,6 +41,7 @@ def is_valid_uuid(val: str) -> bool:
 
 @router.post("")
 async def create_submission(
+    request: Request,
     task_id: str = Form(...),
     student_id: Optional[str] = Form(None),
     file: UploadFile = File(...),
@@ -64,7 +65,8 @@ async def create_submission(
 
     # Upload to S3
     content_type = file.content_type or "application/octet-stream"
-    file_key = upload_file(file_data, filename, content_type)
+    user_token = request.headers.get("Authorization")
+    file_key = upload_file(file_data, filename, content_type, user_token=user_token)
 
     # Determine file type
     file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "pdf"
@@ -274,6 +276,7 @@ def _generate_student_id_from_filename(filename: str, index: int) -> str:
 
 @router.post("/bulk")
 async def bulk_upload_submissions(
+    request: Request,
     task_id: str = Form(...),
     files: List[UploadFile] = File(...),
     student_ids: str = Form(""),
@@ -318,6 +321,8 @@ async def bulk_upload_submissions(
     submitted = []
     failed = []
 
+    user_token = request.headers.get("Authorization")
+
     for idx, upload_file_obj in enumerate(files):
         file_data = await upload_file_obj.read()
         filename = upload_file_obj.filename or f"upload_{idx}.pdf"
@@ -337,7 +342,7 @@ async def bulk_upload_submissions(
         # Upload to S3
         content_type = upload_file_obj.content_type or "application/octet-stream"
         try:
-            file_key = upload_file(file_data, filename, content_type)
+            file_key = upload_file(file_data, filename, content_type, user_token=user_token)
         except Exception as e:
             failed.append({"file": filename, "error": f"S3 upload failed: {str(e)}"})
             continue

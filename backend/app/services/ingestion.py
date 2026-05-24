@@ -13,7 +13,7 @@ ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 
 
-def _get_auth_headers(content_type: str = None) -> dict:
+def _get_auth_headers(content_type: str = None, user_token: str = None) -> dict:
     """Helper to build safe and backward-compatible Supabase REST headers."""
     headers = {
         "apikey": settings.SUPABASE_ANON_KEY,
@@ -21,8 +21,14 @@ def _get_auth_headers(content_type: str = None) -> dict:
     if content_type:
         headers["Content-Type"] = content_type
         
-    # Only use Authorization header if key is a legacy JWT (starts with eyJ)
-    if settings.SUPABASE_ANON_KEY and settings.SUPABASE_ANON_KEY.startswith("eyJ"):
+    # If the user's JWT token is provided, prioritize it for Authorization!
+    if user_token:
+        if user_token.startswith("Bearer "):
+            headers["Authorization"] = user_token
+        else:
+            headers["Authorization"] = f"Bearer {user_token}"
+    # Otherwise, fallback to the anon key ONLY if it is not a new sb_publishable_ key (which is not a JWT)
+    elif settings.SUPABASE_ANON_KEY and not settings.SUPABASE_ANON_KEY.startswith("sb_publishable_"):
         headers["Authorization"] = f"Bearer {settings.SUPABASE_ANON_KEY}"
         
     return headers
@@ -46,7 +52,7 @@ def validate_file(filename: str, file_size: int) -> tuple[bool, str | None]:
     return True, None
 
 
-def upload_file(file_data: bytes, filename: str, content_type: str, folder: str = "submissions") -> str:
+def upload_file(file_data: bytes, filename: str, content_type: str, folder: str = "submissions", user_token: str = None) -> str:
     """
     Upload a file to Supabase Storage and return the object key.
 
@@ -55,6 +61,7 @@ def upload_file(file_data: bytes, filename: str, content_type: str, folder: str 
         filename: Original filename
         content_type: MIME type
         folder: Storage folder/prefix (default "submissions")
+        user_token: Optional authenticated user's session JWT
 
     Returns:
         object_key: Supabase object path/key for retrieval
@@ -64,7 +71,7 @@ def upload_file(file_data: bytes, filename: str, content_type: str, folder: str 
     object_key = f"{folder}/{uuid.uuid4()}.{ext}"
 
     url = f"{settings.SUPABASE_URL}/storage/v1/object/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
-    headers = _get_auth_headers(content_type)
+    headers = _get_auth_headers(content_type, user_token)
 
     # Upload using HTTP POST (or PUT fallback if there are conflicts)
     response = requests.post(url, data=file_data, headers=headers)
@@ -79,10 +86,10 @@ def upload_file(file_data: bytes, filename: str, content_type: str, folder: str 
     return object_key
 
 
-def download_file(object_key: str) -> bytes:
+def download_file(object_key: str, user_token: str = None) -> bytes:
     """Download a file from Supabase Storage by its object key."""
     url = f"{settings.SUPABASE_URL}/storage/v1/object/authenticated/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
-    headers = _get_auth_headers()
+    headers = _get_auth_headers(user_token=user_token)
     
     response = requests.get(url, headers=headers)
     if response.status_code != 200:
@@ -92,10 +99,10 @@ def download_file(object_key: str) -> bytes:
     return response.content
 
 
-def delete_file(object_key: str) -> None:
+def delete_file(object_key: str, user_token: str = None) -> None:
     """Delete a file from Supabase Storage."""
     url = f"{settings.SUPABASE_URL}/storage/v1/object/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
-    headers = _get_auth_headers()
+    headers = _get_auth_headers(user_token=user_token)
     
     try:
         response = requests.delete(url, headers=headers)
@@ -105,7 +112,7 @@ def delete_file(object_key: str) -> None:
         logger.error(f"Failed to delete file {object_key} from Supabase: {e}")
 
 
-def generate_presigned_url(object_key: str, expiry_seconds: int = 3600) -> str:
+def generate_presigned_url(object_key: str, expiry_seconds: int = 3600, user_token: str = None) -> str:
     """
     Generate a signed URL for a Supabase Storage object.
     Used by the DEIS Diagram-marker to download submission images.
@@ -113,12 +120,14 @@ def generate_presigned_url(object_key: str, expiry_seconds: int = 3600) -> str:
     Args:
         object_key: Supabase object path/key
         expiry_seconds: URL validity period (default 1 hour)
+        user_token: Optional authenticated user's session JWT
 
     Returns:
         Fully qualified signed URL string
     """
     url = f"{settings.SUPABASE_URL}/storage/v1/object/sign/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
-    headers = _get_auth_headers("application/json")
+    headers = _get_auth_headers("application/json", user_token)
+
     payload = {"expiresIn": expiry_seconds}
 
     try:

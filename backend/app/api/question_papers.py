@@ -5,7 +5,7 @@ Provides endpoints for:
   - Uploading a question paper PDF/image and receiving an AI-generated draft rubric.
   - Confirming a draft rubric (with teacher edits) to create a Task + Rubric in one step.
 """
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -67,6 +67,7 @@ class ConfirmRubricRequest(BaseModel):
 
 @router.post("/upload")
 async def upload_question_paper(
+    request: Request,
     file: UploadFile = File(...),
     subject: str = Form("General"),
     board: str = Form("CBSE"),
@@ -94,8 +95,9 @@ async def upload_question_paper(
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "pdf"
     from app.services.ingestion import upload_file
 
+    user_token = request.headers.get("Authorization")
     try:
-        qpaper_key = upload_file(file_data, filename, content_type, folder="qpapers")
+        qpaper_key = upload_file(file_data, filename, content_type, folder="qpapers", user_token=user_token)
     except Exception as e:
         raise HTTPException(
             status_code=500,
