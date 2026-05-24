@@ -76,6 +76,11 @@ METADATA:
 
 Decompose this question paper into individual rubric steps. Each step represents one question or sub-question.
 
+CRITICAL SUBJECT FILTER:
+- Only decompose questions that belong to the specified Subject: {subject}.
+- If the question paper contains other subjects (e.g. Chemistry, Mathematics, Biology), completely ignore sections and questions belonging to them.
+- Ensure the sum of the marks of all steps matches the Total Marks ({max_marks}) specified in the metadata. Scale the marks proportionally if the original marks sum to a different total.
+
 Return a JSON object:
 {{
   "steps": [
@@ -88,7 +93,7 @@ Return a JSON object:
       "expected_exprs": ["<SymPy-parseable equation if applicable, else empty list>"],
       "marking_notes": "<specific marking criteria or accepted alternatives>",
       "partial_credit": true,
-      "diagram_relations": [<for diagram steps only: {{"label": "...", "region": "region_N"}}>, else empty list]
+      "diagram_relations": []
     }}
   ],
   "grading_notes": "<overall grading guidance for this paper>",
@@ -97,8 +102,8 @@ Return a JSON object:
 }}
 
 Rules:
-- Every question/sub-question must have its own step.
-- Marks MUST sum to {max_marks} (or as close as possible based on the paper).
+- Every question/sub-question relevant to {subject} must have its own step.
+- Marks MUST sum to {max_marks}.
 - If marks are not explicitly stated in the paper, distribute them proportionally.
 - For "Draw and label" questions, create separate diagram and labels steps.
 - Include expected_exprs for derivation/calculation questions where you can infer the expected formula.

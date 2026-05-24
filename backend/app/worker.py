@@ -27,6 +27,12 @@ celery_app.conf.update(
     },
     # Default queue for unrouted tasks
     task_default_queue="default",
+    imports=[
+        "app.tasks.parse_submission",
+        "app.tasks.grade_submission",
+        "app.tasks.orchestrator",
+        "app.tasks.extract_identity",
+    ],
 )
 
 # Auto-discover task modules

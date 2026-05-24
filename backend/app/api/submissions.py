@@ -13,8 +13,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+import uuid
 from app.db.session import get_db
-from app.db.models import Submission, GradeResult, GradingRun, Task, TaskRubric, User
+from app.db.models import Submission, GradeResult, GradingRun, Task, TaskRubric, User, Student
 from app.schemas.common import ApiResponse
 from app.schemas.submission import SubmissionResponse, SubmissionUploadResponse, ParsedContent
 from app.schemas.grade import StepGradeResult, GradeResultResponse
@@ -27,6 +28,15 @@ router = APIRouter(
     tags=["Submissions"],
     dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal"]))]
 )
+
+
+def is_valid_uuid(val: str) -> bool:
+    try:
+        import uuid
+        uuid.UUID(str(val))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 @router.post("")
@@ -63,10 +73,32 @@ async def create_submission(
     if student_id and not student_id.replace('-', '').isalnum() and len(student_id) < 30:
         student_id = None # Ignore dummy strings, let OCR handle it
 
+    # Check if student_id is a valid UUID
+    db_student_id = None
+    if student_id:
+        if is_valid_uuid(student_id):
+            db_student_id = student_id
+        else:
+            # Try to lookup student
+            clean_term = student_id
+            if clean_term.upper().startswith("STUDENT-"):
+                clean_term = clean_term[8:]
+            student_result = await db.execute(
+                select(Student).filter(
+                    (Student.roll_number.ilike(clean_term)) |
+                    (Student.name.ilike(clean_term)) |
+                    (Student.roll_number.ilike(student_id)) |
+                    (Student.name.ilike(student_id))
+                )
+            )
+            student_obj = student_result.scalar_one_or_none()
+            if student_obj:
+                db_student_id = str(student_obj.id)
+
     # Create submission record
     submission = Submission(
         task_id=task.id,
-        student_id=student_id if student_id else None,
+        student_id=db_student_id,
         file_key=file_key,
         file_name=filename,
         file_type=file_type,
@@ -313,10 +345,32 @@ async def bulk_upload_submissions(
         # Determine file type
         file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "pdf"
 
+        # Check if student_id is a valid UUID
+        db_student_id = None
+        if student_id:
+            if is_valid_uuid(student_id):
+                db_student_id = student_id
+            else:
+                # Try to lookup student
+                clean_term = student_id
+                if clean_term.upper().startswith("STUDENT-"):
+                    clean_term = clean_term[8:]
+                student_result = await db.execute(
+                    select(Student).filter(
+                        (Student.roll_number.ilike(clean_term)) |
+                        (Student.name.ilike(clean_term)) |
+                        (Student.roll_number.ilike(student_id)) |
+                        (Student.name.ilike(student_id))
+                    )
+                )
+                student_obj = student_result.scalar_one_or_none()
+                if student_obj:
+                    db_student_id = str(student_obj.id)
+
         # Create submission record
         submission = Submission(
             task_id=task.id,
-            student_id=student_id,
+            student_id=db_student_id,
             file_key=file_key,
             file_name=filename,
             file_type=file_type,
