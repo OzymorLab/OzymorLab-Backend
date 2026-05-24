@@ -36,6 +36,23 @@ def align_steps(rubric_steps: list[dict], student_steps: list[dict]) -> list[dic
             for i, s in enumerate(rubric_steps)
         ]
 
+    # If there is only one rubric step, or it is a fallback catch-all step, map all student steps to it
+    is_fallback = len(rubric_steps) == 1 or any(
+        "auto-rubric generation failed" in s.get("description", "").lower()
+        or "fallback" in s.get("description", "").lower()
+        or "full answer" in s.get("description", "").lower()
+        for s in rubric_steps
+    )
+    if is_fallback:
+        return [
+            {
+                "rubric_step": s.get("step_num", i + 1),
+                "student_steps": [st.get("step_num", j + 1) for j, st in enumerate(student_steps)],
+                "confidence": 1.0,
+            }
+            for i, s in enumerate(rubric_steps)
+        ]
+
     prompt = build_alignment_prompt(rubric_steps, student_steps)
     result = call_gemini(
         prompt, system_prompt=ALIGNMENT_SYSTEM_PROMPT, call_type="alignment"
@@ -208,6 +225,33 @@ def evaluate_text_component(
 
     # Align student steps to this component's rubric steps
     alignment = align_steps(relevant_rubric_steps, student_steps)
+
+    # Normalize alignment list to ensure all step identifiers are integers
+    normalized_alignment = []
+    for item in (alignment or []):
+        r_val = item.get("rubric_step")
+        if isinstance(r_val, str):
+            try:
+                r_val = int("".join(c for c in r_val if c.isdigit()))
+            except ValueError:
+                continue
+        
+        s_vals = []
+        for s_val in item.get("student_steps", []):
+            if isinstance(s_val, str):
+                try:
+                    s_vals.append(int("".join(c for c in s_val if c.isdigit())))
+                except ValueError:
+                    pass
+            elif isinstance(s_val, (int, float)):
+                s_vals.append(int(s_val))
+                
+        normalized_alignment.append({
+            "rubric_step": r_val,
+            "student_steps": s_vals,
+            "confidence": item.get("confidence", 0.5)
+        })
+    alignment = normalized_alignment
 
     student_steps_by_num = {
         s.get("step_num", i + 1): s for i, s in enumerate(student_steps)

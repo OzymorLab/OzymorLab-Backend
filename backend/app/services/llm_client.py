@@ -201,9 +201,11 @@ Grade this step. Return JSON:
 
 def build_alignment_prompt(rubric_steps: list[dict], student_steps: list[dict]) -> str:
     """Build prompt to align student steps to rubric steps."""
-    r_desc = "\n".join(f"  R{s.get('step_num', i+1)}: {s.get('description', '')}" for i, s in enumerate(rubric_steps))
-    s_desc = "\n".join(f"  S{s.get('step_num', i+1)}: {s.get('text', '')[:200]}" for i, s in enumerate(student_steps))
+    r_desc = "\n".join(f"  Rubric Step {s.get('step_num', i+1)}: {s.get('description', '')}" for i, s in enumerate(rubric_steps))
+    s_desc = "\n".join(f"  Student Step {s.get('step_num', i+1)}: {s.get('text', '')[:200]}" for i, s in enumerate(student_steps))
     return f"""RUBRIC STEPS:\n{r_desc}\n\nSTUDENT STEPS:\n{s_desc}\n
-Map each rubric step to relevant student step(s). Return JSON array:
-[{{"rubric_step": 1, "student_steps": [1, 2], "confidence": 0.9}}, ...]
+Map each rubric step to the most relevant student step(s). Use only the integer step numbers for the keys and values. Return a JSON array:
+[
+  {{"rubric_step": 1, "student_steps": [2, 3], "confidence": 0.95}}
+]
 If no match, use "student_steps": [] with confidence 0.0."""

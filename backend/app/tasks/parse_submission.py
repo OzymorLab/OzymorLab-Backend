@@ -30,8 +30,8 @@ def parse(self, submission_id: str):
         # Load submission
         submission = session.query(Submission).filter_by(id=submission_id).first()
         if not submission:
-            logger.error(f"Submission {submission_id} not found")
-            return {"error": "Submission not found"}
+            logger.warning(f"Submission {submission_id} not found, retrying in 2s...")
+            raise self.retry(exc=ValueError("Submission not found yet"), countdown=2, max_retries=5)
 
         # Update status to PARSING
         submission.status = "PARSING"

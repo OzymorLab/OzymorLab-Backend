@@ -11,7 +11,7 @@ from app.worker import celery_app
 from app.db.session import get_sync_session
 from app.db.models import Submission, Student
 from app.services.ingestion import download_file
-from app.services.llm_client import get_gemini_client
+from app.services.llm_client import get_client as get_gemini_client
 
 logger = logging.getLogger(__name__)
 

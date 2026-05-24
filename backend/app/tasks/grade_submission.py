@@ -33,8 +33,8 @@ def grade(self, submission_id: str, grading_run_id: str):
         run = session.query(GradingRun).filter_by(id=grading_run_id).first()
 
         if not submission or not run:
-            logger.error(f"Submission {submission_id} or run {grading_run_id} not found")
-            return {"error": "Not found"}
+            logger.warning(f"Submission {submission_id} or run {grading_run_id} not found, retrying in 2s...")
+            raise self.retry(exc=ValueError("Submission or run not found yet"), countdown=2, max_retries=5)
             
         task = session.query(Task).filter_by(id=run.task_id).first()
 
