@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
+from sqlalchemy.orm import joinedload
 
 from app.db.session import get_db
 from app.db.models import User, School, SchoolClass, Section, Student
@@ -250,6 +251,7 @@ async def list_students(
         .join(Section, Student.section_id == Section.id)
         .join(SchoolClass, Section.class_id == SchoolClass.id)
         .filter(SchoolClass.school_id == current_user.school_id)
+        .options(joinedload(Student.section).joinedload(Section.school_class))
     )
 
     if class_name:

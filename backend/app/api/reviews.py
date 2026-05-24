@@ -77,7 +77,7 @@ class ReviewApproveRequest(BaseModel):
 class ReviewItemResponse(BaseModel):
     """Summary of a submission needing review."""
     submission_id: str
-    student_id: str
+    student_id: str | None = None
     task_title: str
     grade: int
     max_grade: int
@@ -93,7 +93,7 @@ class ReviewItemResponse(BaseModel):
 class ReviewDetailResponse(BaseModel):
     """Detailed component breakdown for review."""
     submission_id: str
-    student_id: str
+    student_id: str | None = None
     task_title: str
     grade: int
     max_grade: int
@@ -106,6 +106,8 @@ class ReviewDetailResponse(BaseModel):
     justification: str | None
     review_notes: str | None
     reviewed_by: str | None
+    raw_text: str | None = None
+    parsed_content: dict | None = None
 
     model_config = {"from_attributes": True}
 
@@ -197,6 +199,8 @@ async def get_review_detail(submission_id: str, db: AsyncSession = Depends(get_d
             justification=grade_result.justification,
             review_notes=grade_result.review_notes,
             reviewed_by=grade_result.reviewed_by,
+            raw_text=submission.raw_text,
+            parsed_content=submission.parsed_content,
         )
     }
 

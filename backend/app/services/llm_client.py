@@ -97,6 +97,7 @@ def call_gemini(
     max_tokens: int = 2048,
     call_type: str = "general",
     api_key: str | None = None,
+    response_mime_type: str | None = None,
 ) -> dict[str, Any]:
     """Make a call to Gemini API with retry logic and exponential backoff.
     
@@ -119,6 +120,7 @@ def call_gemini(
                     system_instruction=system_prompt if system_prompt else None,
                     temperature=temp,
                     max_output_tokens=max_tokens,
+                    response_mime_type=response_mime_type,
                 ),
             )
             latency_ms = int((time.time() - start_time) * 1000)
@@ -161,7 +163,13 @@ def parse_json_response(response_text: str) -> dict | list | None:
         text = text.strip()
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as jde:
+        try:
+            with open("failed_json.txt", "w", encoding="utf-8") as f:
+                f.write(text)
+        except Exception:
+            pass
+        
         for sc, ec in [("{", "}"), ("[", "]")]:
             si, ei = text.find(sc), text.rfind(ec)
             if si != -1 and ei > si:
@@ -169,7 +177,7 @@ def parse_json_response(response_text: str) -> dict | list | None:
                     return json.loads(text[si:ei + 1])
                 except json.JSONDecodeError:
                     continue
-        logger.warning(f"JSON parse failed: {text[:200]}...")
+        logger.warning(f"JSON parse failed ({jde.msg} at line {jde.lineno} col {jde.colno}): {text[:200]}...")
         return None
 
 

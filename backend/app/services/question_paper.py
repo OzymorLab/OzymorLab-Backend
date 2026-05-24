@@ -114,8 +114,9 @@ Rules:
         prompt,
         system_prompt=RUBRIC_GENERATION_SYSTEM_PROMPT,
         temperature=0.1,
-        max_tokens=4096,
+        max_tokens=8192,
         call_type="rubric_generation",
+        response_mime_type="application/json",
     )
 
     if not result["success"]:

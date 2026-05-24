@@ -50,20 +50,21 @@ def extract(self, submission_id: str):
             img_bytes = file_data
         
         # Prompt Gemini to extract identity
+        from google.genai import types
         client = get_gemini_client()
         prompt = "Extract the student's identity details from the top of this answer sheet."
         
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                {"mime_type": "image/png", "data": img_bytes},
+                types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
                 prompt
             ],
-            config={
-                'response_mime_type': 'application/json',
-                'response_schema': StudentIdentityExtraction,
-                'temperature': 0.1
-            }
+            config=types.GenerateContentConfig(
+                response_mime_type='application/json',
+                response_schema=StudentIdentityExtraction,
+                temperature=0.1
+            )
         )
         
         identity = json.loads(response.text)

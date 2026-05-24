@@ -173,6 +173,7 @@ Return JSON:
             temperature=temperature,
             call_type="reasoning_grading",
             api_key=api_key,
+            response_mime_type="application/json",
         )
 
         if not result["success"]:

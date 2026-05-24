@@ -55,7 +55,10 @@ def align_steps(rubric_steps: list[dict], student_steps: list[dict]) -> list[dic
 
     prompt = build_alignment_prompt(rubric_steps, student_steps)
     result = call_gemini(
-        prompt, system_prompt=ALIGNMENT_SYSTEM_PROMPT, call_type="alignment"
+        prompt,
+        system_prompt=ALIGNMENT_SYSTEM_PROMPT,
+        call_type="alignment",
+        response_mime_type="application/json",
     )
 
     if not result["success"]:
@@ -127,6 +130,7 @@ def grade_single_step(
         temperature=temperature,
         call_type="step_grading",
         api_key=api_key,
+        response_mime_type="application/json",
     )
 
     if not result["success"]:

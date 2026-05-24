@@ -114,6 +114,7 @@ Rules:
         system_prompt=DECOMPOSITION_SYSTEM_PROMPT,
         temperature=0.0,
         call_type="question_decomposition",
+        response_mime_type="application/json",
     )
 
     if not result["success"]:

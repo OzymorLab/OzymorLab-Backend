@@ -117,15 +117,29 @@ def decode_supabase_token(token: str, jwks: dict = None) -> dict:
     Decodes and validates a Supabase JWT token using JWKS (public key) or fallback secret.
     """
     try:
-        # Get unverified header to check the 'kid'
+        # Get unverified header to check the 'kid' and 'alg'
         unverified_header = jwt.get_unverified_header(token)
         kid = unverified_header.get("kid")
+        alg = unverified_header.get("alg")
+        logger.info(f"JWT Header: {unverified_header}")
         
-        # If JWKS is available and kid exists, attempt public key verification
-        if jwks and kid:
-            key_data = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
-            if key_data:
-                try:
+        # 1. If symmetric algorithm, decode using Supabase symmetric secret
+        if alg == "HS256":
+            if settings.SUPABASE_JWT_SECRET:
+                return jwt.decode(
+                    token,
+                    settings.SUPABASE_JWT_SECRET,
+                    algorithms=["HS256"],
+                    audience="authenticated"
+                )
+            else:
+                raise JWTError("HS256 token received, but SUPABASE_JWT_SECRET is not configured.")
+        
+        # 2. If asymmetric algorithm, decode using JWKS public keys
+        if alg in ("RS256", "ES256"):
+            if jwks and kid:
+                key_data = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+                if key_data:
                     key = jwk.construct(key_data)
                     return jwt.decode(
                         token,
@@ -133,22 +147,16 @@ def decode_supabase_token(token: str, jwks: dict = None) -> dict:
                         algorithms=["RS256", "ES256"],
                         audience="authenticated"
                     )
-                except Exception as e:
-                    logger.debug(f"JWKS public key decoding failed, checking fallback secret: {e}")
+                else:
+                    raise JWTError(f"Key ID {kid} not found in JWKS.")
+            else:
+                raise JWTError("Asymmetric token received, but JWKS is not loaded or Key ID is missing.")
         
-        # Fallback to symmetric key verification if secret is configured
-        if settings.SUPABASE_JWT_SECRET:
-            return jwt.decode(
-                token,
-                settings.SUPABASE_JWT_SECRET,
-                algorithms=["HS256"],
-                audience="authenticated"
-            )
+        # If unknown algorithm, raise JWTError
+        raise JWTError(f"Unsupported token algorithm: {alg}")
         
-        # If neither worked, raise JWTError
-        raise JWTError("No valid keys found for JWT verification.")
     except Exception as e:
-        logger.error(f"JWT verification failed: {e}")
+        logger.error(f"JWT verification failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Could not validate credentials: {str(e)}",
@@ -173,12 +181,12 @@ async def get_current_user(
     
     try:
         payload = decode_supabase_token(token, jwks)
-    except HTTPException:
-        # Graceful fallback to legacy local tokens if Supabase is not configured or for local test suites
-        if not settings.SUPABASE_URL and not settings.SUPABASE_JWT_SECRET:
+    except HTTPException as e:
+        # Graceful fallback to legacy local tokens if Supabase validation failed
+        try:
             payload = decode_token(token)
-        else:
-            raise
+        except Exception:
+            raise e
 
     user_id = payload.get("sub")
     email = payload.get("email")
