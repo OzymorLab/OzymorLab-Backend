@@ -13,6 +13,21 @@ ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 
 
+def _get_auth_headers(content_type: str = None) -> dict:
+    """Helper to build safe and backward-compatible Supabase REST headers."""
+    headers = {
+        "apikey": settings.SUPABASE_ANON_KEY,
+    }
+    if content_type:
+        headers["Content-Type"] = content_type
+        
+    # Only use Authorization header if key is a legacy JWT (starts with eyJ)
+    if settings.SUPABASE_ANON_KEY and settings.SUPABASE_ANON_KEY.startswith("eyJ"):
+        headers["Authorization"] = f"Bearer {settings.SUPABASE_ANON_KEY}"
+        
+    return headers
+
+
 def ensure_bucket_exists(client=None) -> None:
     """
     Bucket validation helper.
@@ -49,10 +64,7 @@ def upload_file(file_data: bytes, filename: str, content_type: str, folder: str 
     object_key = f"{folder}/{uuid.uuid4()}.{ext}"
 
     url = f"{settings.SUPABASE_URL}/storage/v1/object/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
-    headers = {
-        "Authorization": f"Bearer {settings.SUPABASE_ANON_KEY}",
-        "Content-Type": content_type
-    }
+    headers = _get_auth_headers(content_type)
 
     # Upload using HTTP POST (or PUT fallback if there are conflicts)
     response = requests.post(url, data=file_data, headers=headers)
@@ -70,9 +82,7 @@ def upload_file(file_data: bytes, filename: str, content_type: str, folder: str 
 def download_file(object_key: str) -> bytes:
     """Download a file from Supabase Storage by its object key."""
     url = f"{settings.SUPABASE_URL}/storage/v1/object/authenticated/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
-    headers = {
-        "Authorization": f"Bearer {settings.SUPABASE_ANON_KEY}",
-    }
+    headers = _get_auth_headers()
     
     response = requests.get(url, headers=headers)
     if response.status_code != 200:
@@ -85,9 +95,7 @@ def download_file(object_key: str) -> bytes:
 def delete_file(object_key: str) -> None:
     """Delete a file from Supabase Storage."""
     url = f"{settings.SUPABASE_URL}/storage/v1/object/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
-    headers = {
-        "Authorization": f"Bearer {settings.SUPABASE_ANON_KEY}",
-    }
+    headers = _get_auth_headers()
     
     try:
         response = requests.delete(url, headers=headers)
@@ -110,10 +118,7 @@ def generate_presigned_url(object_key: str, expiry_seconds: int = 3600) -> str:
         Fully qualified signed URL string
     """
     url = f"{settings.SUPABASE_URL}/storage/v1/object/sign/{settings.SUPABASE_STORAGE_BUCKET}/{object_key}"
-    headers = {
-        "Authorization": f"Bearer {settings.SUPABASE_ANON_KEY}",
-        "Content-Type": "application/json",
-    }
+    headers = _get_auth_headers("application/json")
     payload = {"expiresIn": expiry_seconds}
 
     try:
@@ -134,3 +139,4 @@ def generate_presigned_url(object_key: str, expiry_seconds: int = 3600) -> str:
     except Exception as e:
         logger.error(f"Failed to generate signed URL for {object_key}: {e}")
         raise
+
