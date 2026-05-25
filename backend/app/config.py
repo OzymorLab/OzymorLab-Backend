@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     # ── App ──
     APP_ENV: str = "development"
     APP_VERSION: str = "0.1.0"
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8000,https://edeziav2.vercel.app"
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8000,https://edeziav2.vercel.app,https://ozymorlab.vercel.app"
 
     # ── Database ──
     DATABASE_URL: str = "postgresql+asyncpg://aios:aios_secret@postgres:5432/aios"
@@ -70,7 +70,12 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> list[str]:
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+        origins = [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+        # Always ensure production and new domains are allowed
+        for extra in ["https://ozymorlab.vercel.app", "https://edeziav2.vercel.app"]:
+            if extra not in origins:
+                origins.append(extra)
+        return origins
 
     model_config = {"env_file": (".env", "../.env"), "env_file_encoding": "utf-8", "extra": "ignore"}
 
