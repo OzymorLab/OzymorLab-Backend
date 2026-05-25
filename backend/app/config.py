@@ -75,6 +75,11 @@ class Settings(BaseSettings):
         for extra in ["https://ozymorlab.vercel.app", "https://edeziav2.vercel.app"]:
             if extra not in origins:
                 origins.append(extra)
+        
+        # Security: Remove localhost/loopback origins in production environment
+        if self.APP_ENV.lower() == "production":
+            origins = [o for o in origins if "localhost" not in o and "127.0.0.1" not in o]
+            
         return origins
 
     model_config = {"env_file": (".env", "../.env"), "env_file_encoding": "utf-8", "extra": "ignore"}
