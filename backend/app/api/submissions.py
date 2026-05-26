@@ -20,7 +20,12 @@ from app.schemas.common import ApiResponse
 from app.schemas.submission import SubmissionResponse, SubmissionUploadResponse, ParsedContent
 from app.schemas.grade import StepGradeResult, GradeResultResponse
 from app.services.ingestion import validate_file, upload_file
-from app.services.auth_service import get_current_user, require_role
+from app.services.auth_service import (
+    get_current_user,
+    require_role,
+    check_task_access,
+    check_submission_access
+)
 from app.config import settings
 
 router = APIRouter(
@@ -49,11 +54,12 @@ async def create_submission(
     current_user: User = Depends(get_current_user),
 ):
     """Upload a student submission file → store in S3 → queue for parsing."""
-    # Validate task exists
-    result = await db.execute(select(Task).filter_by(id=task_id))
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    # BOLA / IDOR isolation check
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+    task = await check_task_access(task_uuid, current_user, db)
 
     # Read and validate file
     file_data = await file.read()
@@ -123,7 +129,15 @@ async def create_submission(
 @router.get("/{submission_id}")
 async def get_submission(submission_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get submission status and parsed content."""
-    result = await db.execute(select(Submission).filter_by(id=submission_id))
+    try:
+        sub_uuid = uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_submission_access(sub_uuid, current_user, db)
+
+    result = await db.execute(select(Submission).filter_by(id=sub_uuid))
     submission = result.scalar_one_or_none()
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -155,12 +169,20 @@ async def export_submissions_csv(
     current_user: User = Depends(get_current_user),
 ):
     """Export graded submissions as a CSV file."""
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_task_access(task_uuid, current_user, db)
+
     # Query graded submissions for a specific task and eager load grade_results
     from sqlalchemy.orm import selectinload
     query = (
         select(Submission)
         .options(selectinload(Submission.grade_results))
-        .filter_by(task_id=task_id, status="GRADED")
+        .filter_by(task_id=task_uuid, status="GRADED")
         .order_by(Submission.created_at.desc())
     )
     result = await db.execute(query)
@@ -196,7 +218,14 @@ async def list_submissions(
     """List submissions, optionally filtered by task_id and/or status."""
     query = select(Submission).order_by(Submission.created_at.desc())
     if task_id:
-        query = query.filter_by(task_id=task_id)
+        try:
+            task_uuid = uuid.UUID(task_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid task UUID format")
+        
+        # BOLA / IDOR isolation check
+        await check_task_access(task_uuid, current_user, db)
+        query = query.filter_by(task_id=task_uuid)
     if status:
         query = query.filter_by(status=status)
         
@@ -216,8 +245,16 @@ async def list_submissions(
 @router.get("/{submission_id}/grade")
 async def get_submission_grade(submission_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Get the grade result for a submission with full step trace."""
+    try:
+        sub_uuid = uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_submission_access(sub_uuid, current_user, db)
+
     result = await db.execute(
-        select(GradeResult).filter_by(submission_id=submission_id)
+        select(GradeResult).filter_by(submission_id=sub_uuid)
         .order_by(GradeResult.graded_at.desc()).limit(1)
     )
     grade = result.scalar_one_or_none()
@@ -299,11 +336,12 @@ async def bulk_upload_submissions(
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
 
-    # Validate task exists
-    result = await db.execute(select(Task).filter_by(id=task_id))
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    # BOLA / IDOR isolation check
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+    task = await check_task_access(task_uuid, current_user, db)
 
     # Parse student IDs
     sid_list: list[str] = []
@@ -427,11 +465,12 @@ async def bulk_grade_submissions(
     Convenience endpoint: create a grading run and immediately start grading
     all PARSED submissions for the given task. Combines POST /runs + POST /runs/{id}/start.
     """
-    # Validate task exists
-    result = await db.execute(select(Task).filter_by(id=payload.task_id))
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    # BOLA / IDOR isolation check
+    try:
+        task_uuid = uuid.UUID(payload.task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+    task = await check_task_access(task_uuid, current_user, db)
 
     # Get active rubric
     rubric_result = await db.execute(

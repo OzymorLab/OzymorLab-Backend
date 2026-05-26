@@ -150,6 +150,9 @@ class User(Base):
     # Map the column to a private attribute to enable automatic encryption/decryption
     _gemini_api_key = Column("gemini_api_key", Text, nullable=True)
     
+    # AI grading preference — any run below this confidence % is flagged for review
+    confidence_threshold = Column(Float, nullable=True, default=0.75)
+
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

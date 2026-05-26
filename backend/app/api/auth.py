@@ -1,5 +1,5 @@
 """
-Auth API — Signup, Login, Token Refresh, Profile, BYOK Gemini Key.
+Auth API — Signup, Login, Token Refresh, Profile, Preferences.
 
 Public endpoints:
   - POST /auth/signup   — create account
@@ -7,9 +7,10 @@ Public endpoints:
   - POST /auth/refresh  — refresh access token
 
 Protected endpoints:
-  - GET  /auth/me            — get current user profile
-  - PUT  /auth/gemini-key    — set/update BYOK Gemini API key
-  - DELETE /auth/gemini-key  — remove stored Gemini key
+  - GET   /auth/me                 — get current user profile
+  - PATCH /auth/me/preferences     — update confidence threshold & display name
+  - PUT   /auth/gemini-key         — set/update BYOK Gemini API key
+  - DELETE /auth/gemini-key        — remove stored Gemini key
 """
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -21,7 +22,7 @@ from app.db.models import User
 from app.schemas.common import ApiResponse
 from app.schemas.auth import (
     SignupRequest, LoginRequest, TokenResponse, RefreshRequest,
-    UserResponse,
+    UserResponse, UpdatePreferencesRequest,
 )
 from app.services.auth_service import (
     hash_password, verify_password,
@@ -177,5 +178,40 @@ async def get_profile(current_user: User = Depends(get_current_user)):
         has_gemini_key=False,
         is_active=current_user.is_active,
         created_at=current_user.created_at.isoformat(),
+        confidence_threshold=current_user.confidence_threshold or 0.75,
     ))
 
+
+@router.patch("/me/preferences")
+async def update_preferences(
+    payload: UpdatePreferencesRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Update per-user AI grading preferences.
+    - confidence_threshold: 0.0–1.0. Grading runs below this percentage are auto-flagged for review.
+    - full_name: Optional display name update.
+    """
+    current_user.confidence_threshold = payload.confidence_threshold
+    if payload.full_name is not None:
+        current_user.full_name = payload.full_name
+
+    await db.commit()
+    await db.refresh(current_user)
+
+    logger.info(
+        f"User {current_user.email} updated preferences: "
+        f"confidence_threshold={payload.confidence_threshold}"
+    )
+
+    return ApiResponse(data=UserResponse(
+        id=str(current_user.id),
+        email=current_user.email,
+        full_name=current_user.full_name,
+        role=current_user.role,
+        has_gemini_key=False,
+        is_active=current_user.is_active,
+        created_at=current_user.created_at.isoformat(),
+        confidence_threshold=current_user.confidence_threshold,
+    ))

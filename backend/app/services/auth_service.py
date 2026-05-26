@@ -260,3 +260,109 @@ def require_role(allowed_roles: list[str]):
         return current_user
     
     return role_checker
+
+
+# ── BOLA / IDOR Tenant Isolation Check Helpers ──
+from sqlalchemy.orm import selectinload, joinedload
+from app.db.models import Task, Submission, GradingRun, Student, ExamCycle, SchoolClass, Section
+
+async def check_task_access(task_id: uuid.UUID, user: User, db: AsyncSession) -> Task:
+    """Check if task belongs to the user's school and return the task."""
+    if user.school_id is None:
+        result = await db.execute(select(Task).filter_by(id=task_id))
+        task = result.scalar_one_or_none()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task
+
+    result = await db.execute(
+        select(Task)
+        .options(joinedload(Task.exam_cycle))
+        .filter_by(id=task_id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if task.exam_cycle and task.exam_cycle.school_id != user.school_id:
+        raise HTTPException(status_code=403, detail="Access denied: Task belongs to another school")
+    
+    return task
+
+async def check_submission_access(submission_id: uuid.UUID, user: User, db: AsyncSession) -> Submission:
+    """Check if submission belongs to the user's school and return it."""
+    if user.school_id is None:
+        result = await db.execute(select(Submission).filter_by(id=submission_id))
+        sub = result.scalar_one_or_none()
+        if not sub:
+            raise HTTPException(status_code=404, detail="Submission not found")
+        return sub
+
+    result = await db.execute(
+        select(Submission)
+        .options(
+            joinedload(Submission.task).joinedload(Task.exam_cycle),
+            joinedload(Submission.student).joinedload(Student.section).joinedload(Section.school_class)
+        )
+        .filter_by(id=submission_id)
+    )
+    sub = result.scalar_one_or_none()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    
+    # Verify through task's exam cycle if exists
+    if sub.task and sub.task.exam_cycle and sub.task.exam_cycle.school_id != user.school_id:
+        raise HTTPException(status_code=403, detail="Access denied: Submission belongs to another school")
+        
+    # Or verify through student class
+    if sub.student and sub.student.section and sub.student.section.school_class and sub.student.section.school_class.school_id != user.school_id:
+        raise HTTPException(status_code=403, detail="Access denied: Student belongs to another school")
+
+    return sub
+
+async def check_run_access(run_id: uuid.UUID, user: User, db: AsyncSession) -> GradingRun:
+    """Check if grading run belongs to the user's school and return it."""
+    if user.school_id is None:
+        result = await db.execute(select(GradingRun).filter_by(id=run_id))
+        run = result.scalar_one_or_none()
+        if not run:
+            raise HTTPException(status_code=404, detail="Grading run not found")
+        return run
+
+    result = await db.execute(
+        select(GradingRun)
+        .options(joinedload(GradingRun.task).joinedload(Task.exam_cycle))
+        .filter_by(id=run_id)
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Grading run not found")
+
+    if run.task and run.task.exam_cycle and run.task.exam_cycle.school_id != user.school_id:
+        raise HTTPException(status_code=403, detail="Access denied: Grading run belongs to another school")
+
+    return run
+
+async def check_student_access(student_id: uuid.UUID, user: User, db: AsyncSession) -> Student:
+    """Check if student belongs to the user's school and return it."""
+    if user.school_id is None:
+        result = await db.execute(select(Student).filter_by(id=student_id))
+        student = result.scalar_one_or_none()
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+        return student
+
+    result = await db.execute(
+        select(Student)
+        .options(joinedload(Student.section).joinedload(Section.school_class))
+        .filter_by(id=student_id)
+    )
+    student = result.scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    if student.section and student.section.school_class and student.section.school_class.school_id != user.school_id:
+        raise HTTPException(status_code=403, detail="Access denied: Student belongs to another school")
+
+    return student
+

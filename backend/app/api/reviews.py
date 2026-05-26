@@ -17,7 +17,12 @@ from sqlalchemy import select
 from app.db.session import get_db
 from app.db.models import GradeResult, Submission, Task, User, GradingRun, ExamCycle
 from app.schemas.common import ApiResponse
-from app.services.auth_service import get_current_user, require_role
+from app.services.auth_service import (
+    get_current_user,
+    require_role,
+    check_task_access,
+    check_submission_access
+)
 
 router = APIRouter(
     prefix="/reviews", 
@@ -134,7 +139,14 @@ async def list_pending_reviews(
     )
 
     if task_id:
-        query = query.filter(Submission.task_id == task_id)
+        try:
+            task_uuid = uuid.UUID(task_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid task UUID format")
+        
+        # BOLA / IDOR isolation check
+        await check_task_access(task_uuid, current_user, db)
+        query = query.filter(Submission.task_id == task_uuid)
 
     # Apply role-based scoping
     query = _scope_review_query_by_role(query, current_user)
@@ -166,11 +178,19 @@ async def get_review_detail(submission_id: str, db: AsyncSession = Depends(get_d
     Get detailed component breakdown for a specific submission.
     Used by the teacher during moderation.
     """
+    try:
+        sub_uuid = uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_submission_access(sub_uuid, current_user, db)
+
     result = await db.execute(
         select(GradeResult, Submission, Task)
         .join(Submission, GradeResult.submission_id == Submission.id)
         .join(Task, Submission.task_id == Task.id)
-        .filter(Submission.id == submission_id)
+        .filter(Submission.id == sub_uuid)
         .order_by(GradeResult.graded_at.desc())
         .limit(1)
     )
@@ -212,10 +232,18 @@ async def approve_grade(
     Approve the AI-generated grade for a submission.
     Moves the review_status from NEEDS_REVIEW → REVIEWED.
     """
+    try:
+        sub_uuid = uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_submission_access(sub_uuid, current_user, db)
+
     result = await db.execute(
         select(GradeResult)
         .join(Submission, GradeResult.submission_id == Submission.id)
-        .filter(Submission.id == submission_id)
+        .filter(Submission.id == sub_uuid)
         .order_by(GradeResult.graded_at.desc())
         .limit(1)
     )
@@ -252,10 +280,18 @@ async def override_grade(
     Override the AI-generated grade with a teacher's corrected grade.
     Moves the review_status to OVERRIDDEN.
     """
+    try:
+        sub_uuid = uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_submission_access(sub_uuid, current_user, db)
+
     result = await db.execute(
         select(GradeResult)
         .join(Submission, GradeResult.submission_id == Submission.id)
-        .filter(Submission.id == submission_id)
+        .filter(Submission.id == sub_uuid)
         .order_by(GradeResult.graded_at.desc())
         .limit(1)
     )

@@ -10,7 +10,13 @@ from pydantic import BaseModel, Field
 from app.db.session import get_db
 from app.db.models import Submission, SubmissionStep, GradeResult, Task, Student, User
 from app.schemas.common import ApiResponse
-from app.services.auth_service import get_current_user, require_role
+from app.services.auth_service import (
+    get_current_user,
+    require_role,
+    check_task_access,
+    check_submission_access
+)
+import uuid
 
 router = APIRouter(
     prefix="/analysis",
@@ -111,12 +117,19 @@ async def list_task_roster(
     Roster listing for a given task.
     Returns student names, avatars, scores, flag colors, and submission times for the sidebar.
     """
+    # BOLA / IDOR isolation check
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+    await check_task_access(task_uuid, current_user, db)
+
     # Fetch all submissions for the task with loaded students and grade_results
     from sqlalchemy.orm import selectinload
     query = (
         select(Submission)
         .options(selectinload(Submission.student), selectinload(Submission.grade_results))
-        .filter(Submission.task_id == task_id)
+        .filter(Submission.task_id == task_uuid)
         .order_by(Submission.created_at.desc())
     )
     result = await db.execute(query)
@@ -191,11 +204,19 @@ async def get_submission_analysis_detail(
     Get full submission details with the structured list of steps, LaTeX math,
     and OCR bounding box coordinates from the `submission_steps` table.
     """
+    try:
+        sub_uuid = uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
+    
+    # BOLA / IDOR isolation check
+    await check_submission_access(sub_uuid, current_user, db)
+
     from sqlalchemy.orm import selectinload
     query = (
         select(Submission)
         .options(selectinload(Submission.student), selectinload(Submission.steps), selectinload(Submission.grade_results), selectinload(Submission.task))
-        .filter(Submission.id == submission_id)
+        .filter(Submission.id == sub_uuid)
     )
     result = await db.execute(query)
     submission = result.scalar_one_or_none()
@@ -290,9 +311,17 @@ async def override_submission_marks(
             detail="Students are not authorized to override marks.",
         )
 
+    try:
+        sub_uuid = uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_submission_access(sub_uuid, current_user, db)
+
     # 1. Fetch GradeResult
     g_res = await db.execute(
-        select(GradeResult).filter(GradeResult.submission_id == submission_id)
+        select(GradeResult).filter(GradeResult.submission_id == sub_uuid)
         .order_by(GradeResult.graded_at.desc()).limit(1)
     )
     grade_result = g_res.scalar_one_or_none()
@@ -310,7 +339,7 @@ async def override_submission_marks(
     # 2. Proportionally adjust the last step's marks in both table and JSONB to keep them in sync
     steps_res = await db.execute(
         select(SubmissionStep)
-        .filter(SubmissionStep.submission_id == submission_id)
+        .filter(SubmissionStep.submission_id == sub_uuid)
         .order_by(SubmissionStep.step_num.desc()).limit(1)
     )
     last_step = steps_res.scalar_one_or_none()
@@ -344,11 +373,19 @@ async def chat_analysis_copilot(
     Processes chat requests using the database submission steps, matches queries
     to specific steps, and returns highlighted alignment details.
     """
+    try:
+        sub_uuid = uuid.UUID(submission_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_submission_access(sub_uuid, current_user, db)
+
     from sqlalchemy.orm import selectinload
     query = (
         select(Submission)
         .options(selectinload(Submission.student), selectinload(Submission.steps))
-        .filter(Submission.id == submission_id)
+        .filter(Submission.id == sub_uuid)
     )
     result = await db.execute(query)
     submission = result.scalar_one_or_none()

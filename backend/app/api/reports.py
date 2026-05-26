@@ -21,7 +21,13 @@ from app.db.models import (
 )
 from app.schemas.common import ApiResponse
 from app.schemas.operations import TaskSummaryResponse, SchoolDashboardResponse
-from app.services.auth_service import get_current_user, require_role
+from app.services.auth_service import (
+    get_current_user,
+    require_role,
+    check_task_access,
+    check_student_access
+)
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +45,19 @@ async def get_task_summary(
     current_user: User = Depends(get_current_user),
 ):
     """Get aggregate grading statistics for a specific task."""
-    # Fetch task
-    result = await db.execute(select(Task).filter_by(id=task_id))
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found.")
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+
+    # BOLA / IDOR isolation check
+    task = await check_task_access(task_uuid, current_user, db)
 
     # Fetch all grade results for this task
     grade_query = (
         select(GradeResult)
         .join(Submission, GradeResult.submission_id == Submission.id)
-        .filter(Submission.task_id == task_id)
+        .filter(Submission.task_id == task_uuid)
     )
     grade_result = await db.execute(grade_query)
     grades = grade_result.scalars().all()
@@ -69,7 +77,7 @@ async def get_task_summary(
 
     # Count total submissions
     sub_count_result = await db.execute(
-        select(func.count(Submission.id)).filter_by(task_id=task_id)
+        select(func.count(Submission.id)).filter_by(task_id=task_uuid)
     )
     total_submissions = sub_count_result.scalar() or 0
 
@@ -143,10 +151,17 @@ async def get_school_dashboard(
 
     submission_count = (await db.execute(
         select(func.count(Submission.id))
+        .join(Task, Submission.task_id == Task.id)
+        .join(ExamCycle, Task.exam_cycle_id == ExamCycle.id)
+        .filter(ExamCycle.school_id == school_id)
     )).scalar() or 0
 
     graded_count = (await db.execute(
-        select(func.count(Submission.id)).filter_by(status="GRADED")
+        select(func.count(Submission.id))
+        .join(Task, Submission.task_id == Task.id)
+        .join(ExamCycle, Task.exam_cycle_id == ExamCycle.id)
+        .filter(ExamCycle.school_id == school_id)
+        .filter(Submission.status == "GRADED")
     )).scalar() or 0
 
     return ApiResponse(data=SchoolDashboardResponse(
@@ -167,18 +182,13 @@ async def generate_student_report_card(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Generate and download a PDF report card for a specific student."""
-    # Fetch student with section/class info
-    result = await db.execute(
-        select(Student)
-        .options(
-            selectinload(Student.section).selectinload(Section.school_class)
-        )
-        .filter_by(id=student_id)
-    )
-    student = result.scalar_one_or_none()
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found.")
+    try:
+        student_uuid = uuid.UUID(student_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid student UUID format")
+
+    # BOLA / IDOR isolation check
+    student = await check_student_access(student_uuid, current_user, db)
 
     section = student.section
     school_class = section.school_class if section else None
@@ -187,7 +197,7 @@ async def generate_student_report_card(
     sub_result = await db.execute(
         select(Submission)
         .options(selectinload(Submission.grade_results), selectinload(Submission.task))
-        .filter_by(student_id=student_id)
+        .filter_by(student_id=student_uuid)
     )
     submissions = sub_result.scalars().all()
 

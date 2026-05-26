@@ -11,7 +11,11 @@ from app.db.models import Task, TaskRubric, GradingAlert, User
 from app.schemas.common import ApiResponse
 from app.schemas.rubric import TaskCreate, TaskResponse, TaskRubricCreate, TaskRubricResponse
 from app.schemas.observability import GradingAlertResponse, SetBaselineRequest
-from app.services.auth_service import get_current_user, require_role
+from app.services.auth_service import (
+    get_current_user,
+    require_role,
+    check_task_access
+)
 
 router = APIRouter(
     prefix="/tasks", 
@@ -67,11 +71,13 @@ async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db), c
 
 @router.get("/{task_id}")
 async def get_task(task_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Get a task with its current active rubric."""
-    result = await db.execute(select(Task).filter_by(id=task_id))
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+
+    # BOLA / IDOR isolation check
+    task = await check_task_access(task_uuid, current_user, db)
 
     # Get current active rubric
     rubric_result = await db.execute(
@@ -103,7 +109,18 @@ async def get_task(task_id: str, db: AsyncSession = Depends(get_db), current_use
 @router.get("")
 async def list_tasks(db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """List all tasks."""
-    result = await db.execute(select(Task).order_by(Task.created_at.desc()))
+    if current_user.school_id is not None:
+        from app.db.models import ExamCycle
+        query = (
+            select(Task)
+            .join(ExamCycle, Task.exam_cycle_id == ExamCycle.id)
+            .filter(ExamCycle.school_id == current_user.school_id)
+            .order_by(Task.created_at.desc())
+        )
+    else:
+        query = select(Task).order_by(Task.created_at.desc())
+    
+    result = await db.execute(query)
     tasks = result.scalars().all()
 
     items = [
@@ -117,10 +134,13 @@ async def list_tasks(db: AsyncSession = Depends(get_db), current_user: User = De
 @router.post("/{task_id}/rubrics")
 async def create_rubric(task_id: str, payload: TaskRubricCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Upload a new rubric version for a task."""
-    result = await db.execute(select(Task).filter_by(id=task_id))
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+
+    # BOLA / IDOR isolation check
+    task = await check_task_access(task_uuid, current_user, db)
 
     # Deactivate previous rubrics
     prev_result = await db.execute(select(TaskRubric).filter_by(task_id=task_id, is_active=True))
@@ -148,10 +168,13 @@ async def create_rubric(task_id: str, payload: TaskRubricCreate, db: AsyncSessio
 @router.post("/{task_id}/baseline")
 async def set_baseline(task_id: str, payload: SetBaselineRequest, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Set a grading run as the drift baseline for a task."""
-    result = await db.execute(select(Task).filter_by(id=task_id))
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+
+    # BOLA / IDOR isolation check
+    task = await check_task_access(task_uuid, current_user, db)
 
     task.baseline_run_id = uuid.UUID(payload.run_id)
     return ApiResponse(data={"task_id": str(task.id), "baseline_run_id": payload.run_id})
@@ -159,8 +182,15 @@ async def set_baseline(task_id: str, payload: SetBaselineRequest, db: AsyncSessi
 
 @router.get("/{task_id}/alerts")
 async def get_task_alerts(task_id: str, resolved: bool = False, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Get active alerts for a task."""
-    query = select(GradingAlert).filter_by(task_id=task_id, resolved=resolved).order_by(GradingAlert.created_at.desc())
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_task_access(task_uuid, current_user, db)
+
+    query = select(GradingAlert).filter_by(task_id=task_uuid, resolved=resolved).order_by(GradingAlert.created_at.desc())
     result = await db.execute(query)
     alerts = result.scalars().all()
 

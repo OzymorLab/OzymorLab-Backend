@@ -16,7 +16,11 @@ from app.schemas.common import ApiResponse
 from app.schemas.rubric import RubricStep, TaskRubricCreate, TaskResponse, TaskRubricResponse
 from app.services.ingestion import validate_file, upload_file
 from app.services.question_paper import process_question_paper
-from app.services.auth_service import get_current_user, require_role
+from app.services.auth_service import (
+    get_current_user,
+    require_role,
+    check_task_access
+)
 
 router = APIRouter(
     prefix="/question-papers", 
@@ -145,6 +149,22 @@ async def confirm_question_paper(
     """
     import uuid
 
+    # BOLA / IDOR isolation check for exam cycle
+    if payload.exam_cycle_id:
+        try:
+            cycle_uuid = uuid.UUID(payload.exam_cycle_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid exam cycle UUID format")
+        
+        if current_user.school_id is not None:
+            from app.db.models import ExamCycle
+            cycle_res = await db.execute(select(ExamCycle).filter_by(id=cycle_uuid))
+            cycle = cycle_res.scalar_one_or_none()
+            if not cycle:
+                raise HTTPException(status_code=404, detail="Exam cycle not found")
+            if cycle.school_id != current_user.school_id:
+                raise HTTPException(status_code=403, detail="Access denied: Exam cycle belongs to another school")
+
     # Create the Task
     task = Task(
         title=payload.title,
@@ -217,9 +237,18 @@ async def submit_rubric_for_approval(
     """
     from app.schemas.operations import RubricApprovalResponse
 
+    import uuid
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_task_access(task_uuid, current_user, db)
+
     # Fetch active rubric for this task
     result = await db.execute(
-        select(TaskRubric).filter_by(task_id=task_id, is_active=True)
+        select(TaskRubric).filter_by(task_id=task_uuid, is_active=True)
         .order_by(TaskRubric.created_at.desc()).limit(1)
     )
     rubric = result.scalar_one_or_none()
@@ -258,8 +287,17 @@ async def approve_rubric(
     from datetime import datetime, timezone
     from app.schemas.operations import RubricApprovalResponse
 
+    import uuid
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_task_access(task_uuid, current_user, db)
+
     result = await db.execute(
-        select(TaskRubric).filter_by(task_id=task_id, is_active=True)
+        select(TaskRubric).filter_by(task_id=task_uuid, is_active=True)
         .order_by(TaskRubric.created_at.desc()).limit(1)
     )
     rubric = result.scalar_one_or_none()
@@ -311,8 +349,17 @@ async def reject_rubric(
     """
     from app.schemas.operations import RubricApprovalResponse
 
+    import uuid
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+
+    # BOLA / IDOR isolation check
+    await check_task_access(task_uuid, current_user, db)
+
     result = await db.execute(
-        select(TaskRubric).filter_by(task_id=task_id, is_active=True)
+        select(TaskRubric).filter_by(task_id=task_uuid, is_active=True)
         .order_by(TaskRubric.created_at.desc()).limit(1)
     )
     rubric = result.scalar_one_or_none()
