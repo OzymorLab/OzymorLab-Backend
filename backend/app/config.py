@@ -71,10 +71,6 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         origins = [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
-        # Always ensure production and new domains are allowed
-        for extra in ["https://ozymorlab.vercel.app", "https://edeziav2.vercel.app"]:
-            if extra not in origins:
-                origins.append(extra)
         
         # Security: Remove localhost/loopback origins in production environment
         if self.APP_ENV.lower() == "production":

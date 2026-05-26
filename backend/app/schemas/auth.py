@@ -9,7 +9,7 @@ class SignupRequest(BaseModel):
     email: str = Field(min_length=5, max_length=255, description="User email address")
     password: str = Field(min_length=8, max_length=128, description="Password (min 8 chars)")
     full_name: str = Field(min_length=1, max_length=255, description="Full name")
-    role: str = Field(default="teacher", description="teacher | admin | evaluator")
+    role: str = Field(default="teacher", description="teacher | admin | student")
 
 
 class LoginRequest(BaseModel):

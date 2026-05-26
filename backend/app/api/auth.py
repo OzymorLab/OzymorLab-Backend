@@ -57,7 +57,7 @@ async def signup(request: Request, payload: SignupRequest, db: AsyncSession = De
         )
 
     # Validate role
-    valid_roles = {"teacher", "admin", "evaluator"}
+    valid_roles = {"teacher", "admin", "student"}
     role = payload.role.lower()
     if role not in valid_roles:
         raise HTTPException(

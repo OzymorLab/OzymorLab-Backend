@@ -142,7 +142,7 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=False)
     role = Column(String(20), nullable=False, default="teacher")
-    # teacher | admin | evaluator | hod | principal
+    # teacher | admin | student | hod | principal
     school_id = Column(UUID(as_uuid=True), ForeignKey("schools.id"), nullable=True, index=True)
     
     school = relationship("School", back_populates="users")
@@ -252,6 +252,7 @@ class Submission(Base):
     task = relationship("Task", back_populates="submissions")
     grade_results = relationship("GradeResult", back_populates="submission", lazy="selectin")
     student = relationship("Student", back_populates="submissions")
+    steps = relationship("SubmissionStep", back_populates="submission", cascade="all, delete-orphan", order_by="SubmissionStep.step_num")
 
     # Multimodal evaluation
     question_decomposition = Column(JSONB, nullable=True)  # cached decomposition result
@@ -260,6 +261,27 @@ class Submission(Base):
         Index("idx_submissions_task_id", "task_id"),
         Index("idx_submissions_status", "status"),
     )
+
+
+class SubmissionStep(Base):
+    """A structured step within a student submission, containing OCR and grading traces."""
+    __tablename__ = "submission_steps"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    submission_id = Column(UUID(as_uuid=True), ForeignKey("submissions.id"), nullable=False, index=True)
+    step_num = Column(Integer, nullable=False)
+    step_type = Column(String(100), nullable=True)  # e.g., "Substitution Setup", "Integration"
+    text = Column(Text, nullable=True)             # OCR description text
+    latex = Column(Text, nullable=True)            # LaTeX equation
+    sympy_valid = Column(Boolean, nullable=True)    # computational validity (True, False, or Null)
+    justification = Column(Text, nullable=True)    # AI grading rationale
+    marks_awarded = Column(Float, nullable=False, default=0.0)
+    max_marks = Column(Float, nullable=False, default=0.0)
+    error_type = Column(String(100), nullable=True) # Sign Error, Arithmetic Flub
+    bounding_box = Column(JSONB, nullable=True)     # OCR box: {x, y, w, h}
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    submission = relationship("Submission", back_populates="steps")
 
 
 class GradingRun(Base):

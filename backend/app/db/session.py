@@ -74,3 +74,12 @@ async def init_db():
     """Create all tables (used on startup if Alembic is not yet running)."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Seed default math question steps and roster
+    from app.db.seed import seed_database
+    async with async_session_factory() as session:
+        try:
+            await seed_database(session)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to auto-seed database: {e}")
