@@ -44,10 +44,4 @@ class UserResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class UpdateGeminiKeyRequest(BaseModel):
-    """BYOK — set or update the user's Gemini API key."""
-    gemini_api_key: str = Field(
-        min_length=10,
-        max_length=255,
-        description="Your Google Gemini API key. It will be stored securely."
-    )
+

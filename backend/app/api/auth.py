@@ -21,7 +21,7 @@ from app.db.models import User
 from app.schemas.common import ApiResponse
 from app.schemas.auth import (
     SignupRequest, LoginRequest, TokenResponse, RefreshRequest,
-    UserResponse, UpdateGeminiKeyRequest,
+    UserResponse,
 )
 from app.services.auth_service import (
     hash_password, verify_password,
@@ -174,45 +174,8 @@ async def get_profile(current_user: User = Depends(get_current_user)):
         email=current_user.email,
         full_name=current_user.full_name,
         role=current_user.role,
-        has_gemini_key=bool(current_user.gemini_api_key),
+        has_gemini_key=False,
         is_active=current_user.is_active,
         created_at=current_user.created_at.isoformat(),
     ))
-
-
-@router.put("/gemini-key")
-async def set_gemini_key(
-    payload: UpdateGeminiKeyRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Set or update the user's BYOK Gemini API key."""
-    current_user.gemini_api_key = payload.gemini_api_key
-    db.add(current_user)
-    await db.commit()
-    await db.refresh(current_user)
-    logger.info(f"User {current_user.email} updated their Gemini API key")
-
-    return ApiResponse(data={
-        "message": "Gemini API key updated successfully.",
-        "has_gemini_key": True,
-    })
-
-
-@router.delete("/gemini-key")
-async def delete_gemini_key(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Remove the user's stored Gemini API key. System key will be used instead."""
-    current_user.gemini_api_key = None
-    db.add(current_user)
-    await db.commit()
-    await db.refresh(current_user)
-    logger.info(f"User {current_user.email} removed their Gemini API key")
-
-    return ApiResponse(data={
-        "message": "Gemini API key removed. System key will be used for grading.",
-        "has_gemini_key": False,
-    })
 

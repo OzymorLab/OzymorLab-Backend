@@ -64,13 +64,8 @@ def grade(self, submission_id: str, grading_run_id: str):
         rubric_data["grading_notes"] = rubric_record.grading_notes or ""
         rubric_data["model"] = run.model
 
-        # Load BYOK Gemini key if the run creator has one
-        from app.db.models import User
+        # BYOK Gemini key features have been removed. System default key is used.
         user_gemini_key = None
-        if run.created_by:
-            user = session.query(User).filter_by(id=run.created_by).first()
-            if user and user.gemini_api_key:
-                user_gemini_key = user.gemini_api_key
 
         result = grade_submission(
             rubric=rubric_data,
