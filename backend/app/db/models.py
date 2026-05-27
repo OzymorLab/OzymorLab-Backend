@@ -147,8 +147,6 @@ class User(Base):
     
     school = relationship("School", back_populates="users")
     
-    # Map the column to a private attribute to enable automatic encryption/decryption
-    _gemini_api_key = Column("gemini_api_key", Text, nullable=True)
     
     # AI grading preference — any run below this confidence % is flagged for review
     confidence_threshold = Column(Float, nullable=True, default=0.75)
@@ -434,4 +432,78 @@ class IdempotencyKey(Base):
     response_code = Column(Integer, nullable=True)
     response_body = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
+
+
+class Practice(Base):
+    """Practice submission for self-evaluation — file uploaded by student for self-grading."""
+    __tablename__ = "practices"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    file_key = Column(Text, nullable=False)  # S3 object key
+    file_name = Column(String(500), nullable=True)
+    file_type = Column(String(20), nullable=True)  # pdf, png, jpg, jpeg
+    raw_text = Column(Text, nullable=True)  # extracted OCR text
+    parsed_content = Column(JSONB, nullable=True)  # structured answer steps
+    rubric_json = Column(JSONB, nullable=True)  # the rubric used for grading this practice
+    status = Column(String(20), nullable=False, default="PENDING")
+    # PENDING | PARSING | PARSED | GRADING | GRADED | FAILED
+    error_message = Column(Text, nullable=True)
+    title = Column(String(500), nullable=True)  # practice title/name
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id])
+    steps = relationship("PracticeStep", back_populates="practice", cascade="all, delete-orphan", order_by="PracticeStep.step_num")
+    grade_results = relationship("PracticeGradeResult", back_populates="practice", lazy="selectin", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_practices_user_id", "user_id"),
+        Index("idx_practices_status", "status"),
+    )
+
+
+class PracticeStep(Base):
+    """A structured step within a student practice submission."""
+    __tablename__ = "practice_steps"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    practice_id = Column(UUID(as_uuid=True), ForeignKey("practices.id"), nullable=False, index=True)
+    step_num = Column(Integer, nullable=False)
+    step_type = Column(String(100), nullable=True)  # e.g., "Substitution Setup", "Integration"
+    text = Column(Text, nullable=True)  # OCR description text
+    latex = Column(Text, nullable=True)  # LaTeX equation
+    sympy_valid = Column(Boolean, nullable=True)  # computational validity (True, False, or Null)
+    justification = Column(Text, nullable=True)  # AI grading rationale
+    marks_awarded = Column(Float, nullable=False, default=0.0)
+    max_marks = Column(Float, nullable=False, default=0.0)
+    error_type = Column(String(100), nullable=True)  # Sign Error, Arithmetic Flub
+    bounding_box = Column(JSONB, nullable=True)  # OCR box: {x, y, w, h}
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    practice = relationship("Practice", back_populates="steps")
+
+
+class PracticeGradeResult(Base):
+    """Grade output for a practice submission."""
+    __tablename__ = "practice_grade_results"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    practice_id = Column(UUID(as_uuid=True), ForeignKey("practices.id"), nullable=False, index=True)
+    grade = Column(Float, nullable=False)
+    max_grade = Column(Float, nullable=False)
+    confidence = Column(Float, nullable=True)  # scalar summary of grading confidence
+    step_grades = Column(JSONB, nullable=False)  # array of per-step results
+    justification = Column(Text, nullable=True)
+    model_used = Column(String(100), nullable=False)
+    graded_at = Column(DateTime(timezone=True), default=utcnow)
+    latency_ms = Column(Integer, nullable=True)
+
+    # Relationships
+    practice = relationship("Practice", back_populates="grade_results")
+
+    __table_args__ = (
+        Index("idx_practice_grade_results_practice_id", "practice_id"),
+    )
 

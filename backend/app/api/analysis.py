@@ -2,13 +2,13 @@
 Analysis HUD API — Unified queries, rosters, and contextual chat alignment.
 """
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from pydantic import BaseModel, Field
 
 from app.db.session import get_db
-from app.db.models import Submission, SubmissionStep, GradeResult, Task, Student, User
+from app.db.models import Submission, SubmissionStep, GradeResult, Task, Student, User, Practice, PracticeStep, PracticeGradeResult
 from app.schemas.common import ApiResponse
 from app.services.auth_service import (
     get_current_user,
@@ -84,6 +84,17 @@ class ChatMessageResponse(BaseModel):
     alignedReason: Optional[str] = None
 
 
+class PracticeAttemptResponse(BaseModel):
+    id: str
+    title: str
+    date: str
+    rubricName: str
+    score: float
+    maxScore: float
+    steps: List[StepDetailResponse]
+    ocrText: Optional[str] = None
+
+
 # ── Endpoints ──
 
 @router.get("/tasks")
@@ -92,16 +103,60 @@ async def list_analysis_tasks(
     current_user: User = Depends(get_current_user)
 ):
     """Fetch all academic tasks (exam questions) available for analysis."""
-    result = await db.execute(select(Task).order_by(Task.created_at.desc()))
+    from sqlalchemy.orm import selectinload
+    
+    query = (
+        select(Task)
+        .options(selectinload(Task.submissions).selectinload(Submission.grade_results))
+        .order_by(Task.created_at.desc())
+    )
+    result = await db.execute(query)
     tasks = result.scalars().all()
     
     items = []
     for t in tasks:
+        # Calculate metrics from submissions
+        avg_class_score = 0.0
+        avg_latency_ms = 0
+        confidence = 0.0
+        
+        if t.submissions:
+            total_score = 0.0
+            total_latency = 0
+            total_confidence = 0.0
+            count = 0
+            
+            for submission in t.submissions:
+                if submission.grade_results:
+                    for grade in submission.grade_results:
+                        total_score += float(grade.grade or 0)
+                        if grade.latency_ms:
+                            total_latency += grade.latency_ms
+                        if grade.confidence:
+                            total_confidence += float(grade.confidence)
+                        count += 1
+            
+            if count > 0:
+                avg_class_score = round(total_score / count, 2)
+                avg_latency_ms = int(total_latency / count)
+                confidence = round(total_confidence / count, 3)
+        
+        # Format latency as readable string (e.g., "1.2s" or "800ms")
+        if avg_latency_ms >= 1000:
+            avg_latency = f"{avg_latency_ms / 1000:.1f}s"
+        elif avg_latency_ms > 0:
+            avg_latency = f"{avg_latency_ms}ms"
+        else:
+            avg_latency = "0.8s"  # Default estimate
+        
         items.append({
             "id": str(t.id),
             "title": t.title,
             "topic": t.subject,
             "difficulty": "Medium" if t.max_marks > 5 else "Easy",
+            "avgClassScore": avg_class_score,
+            "avgLatency": avg_latency,
+            "confidence": confidence,
             "maxMarks": t.max_marks
         })
     return ApiResponse(data=items)
@@ -371,7 +426,7 @@ async def chat_analysis_copilot(
 ):
     """
     Processes chat requests using the database submission steps, matches queries
-    to specific steps, and returns highlighted alignment details.
+    to specific steps, and returns highlighted alignment details with intelligent insights.
     """
     try:
         sub_uuid = uuid.UUID(submission_id)
@@ -384,7 +439,7 @@ async def chat_analysis_copilot(
     from sqlalchemy.orm import selectinload
     query = (
         select(Submission)
-        .options(selectinload(Submission.student), selectinload(Submission.steps))
+        .options(selectinload(Submission.student), selectinload(Submission.steps), selectinload(Submission.task))
         .filter(Submission.id == sub_uuid)
     )
     result = await db.execute(query)
@@ -401,51 +456,367 @@ async def chat_analysis_copilot(
     aligned_reason = None
     ai_text = ""
 
-    # Parse matching steps
-    if "step 2" in prompt_lower or "step two" in prompt_lower:
-        aligned_step = 2
-        aligned_reason = "Algebraic calculation validation flub"
-        step2 = next((s for s in submission.steps if s.step_num == 2), None)
-        if step2 and step2.sympy_valid is False:
-            ai_text = f"Analyzing Step 2 for {student_name}. The student integrated incorrectly: v = e^(2x) instead of 1/2 e^(2x). Notice how SymPy marked this line as INVALID in the database. I've highlighted the aligned OCR box."
-        else:
-            ai_text = f"Analyzing Step 2 for {student_name}. The step is algebraically valid. See the highlighted block on your answer sheet."
-            
-    elif "step 3" in prompt_lower or "step three" in prompt_lower:
-        aligned_step = 3
-        aligned_reason = "Integration parts substitution formula"
-        step3 = next((s for s in submission.steps if s.step_num == 3), None)
-        if step3 and step3.error_type == "Strategic Deadend":
-            ai_text = f"Step 3 for {student_name} led to a strategic dead end by substituting parts variables backward, making the resulting integral more complex. I've highlighted this step."
-        elif step3 and step3.error_type == "Error Propagation":
-            ai_text = f"For {student_name}, Step 3 inherits the algebraic error from Step 2. While the algebra is consistent with their previous calculation, the base coefficient remains invalid."
-        else:
-            ai_text = f"For {student_name}, Step 3 is mathematically sound. The integration by parts formula was substituted correctly. Bounding box highlighted above."
-            
-    elif "step 4" in prompt_lower or "step four" in prompt_lower or "constant" in prompt_lower:
-        aligned_step = 4
-        aligned_reason = "Notation check"
-        step4 = next((s for s in submission.steps if s.step_num == 4), None)
-        if step4 and step4.error_type == "Minor Notation":
-            ai_text = f"Step 4 evaluated successfully, but the student omitted the '+ C' integration constant. Consequently, the notation compliance engine docked 1.0 marks. Bounding box highlighted."
-        else:
-            ai_text = f"The final step evaluates successfully, including the required constant of integration (+ C). The full manuscript digitization is sound."
-            
+    # ─────────────────────────────────────────
+    # ENHANCED SEMANTIC MATCHING
+    # ─────────────────────────────────────────
+    
+    # Keywords for error types
+    error_keywords = {
+        "sign": ["sign", "negative", "positive", "+", "-"],
+        "arithmetic": ["arithmetic", "calculation", "computed", "wrong answer", "result"],
+        "notation": ["notation", "constant", "missing", "format"],
+        "strategy": ["strategy", "approach", "method", "technique"],
+        "algebraic": ["algebra", "algebraic", "expand", "simplify"],
+    }
+    
+    # Keywords for specific questions
+    question_keywords = {
+        "error": ["error", "mistake", "wrong", "incorrect", "issue", "problem"],
+        "validity": ["valid", "check", "sympy", "computational", "algebra"],
+        "marks": ["marks", "score", "points", "grade", "deduction"],
+        "step": ["step", "part", "section", "line"],
+        "integration": ["integrat", "integral"],
+        "derivat": ["deriv", "derivative", "differential"],
+        "substitut": ["substit", "substitute"],
+        "constant": ["constant", "c", "+ c", "integration constant"],
+    }
+    
+    # Check for specific step number mentions
+    target_step = None
+    for i in range(1, len(submission.steps) + 1):
+        if f"step {i}" in prompt_lower or (["one", "two", "three", "four", "five"][i-1] if i <= 5 else "") in prompt_lower:
+            target_step = i
+            break
+    
+    # Find matching steps if no specific step mentioned
+    if target_step:
+        matched_steps = [s for s in submission.steps if s.step_num == target_step]
     else:
-        # Fallback: highlight the first invalid step or just step 1
-        invalid_step = next((s for s in submission.steps if s.sympy_valid is False), None)
-        if invalid_step:
-            aligned_step = invalid_step.step_num
-            aligned_reason = "Algebraic logic inconsistency"
-            ai_text = f"I scanned the submission and focused my parser on Step {invalid_step.step_num} ({invalid_step.step_type}). There is an algebraic inconsistency in this block where SymPy flagged: '{invalid_step.justification}'. Check the highlighted block above!"
+        # Search for steps with mentioned error types
+        matched_steps = []
+        for step in submission.steps:
+            for error_type, keywords in error_keywords.items():
+                if any(kw in prompt_lower for kw in keywords):
+                    if step.error_type and error_type.lower() in step.error_type.lower():
+                        matched_steps.append(step)
+            # Also match by sympy validity if asking about validity
+            if "valid" in prompt_lower or "check" in prompt_lower:
+                if step.sympy_valid is not None:
+                    matched_steps.append(step)
+        
+        # If still no matches, find first error
+        if not matched_steps:
+            invalid_step = next((s for s in submission.steps if s.sympy_valid is False or s.error_type), None)
+            if invalid_step:
+                matched_steps = [invalid_step]
+            else:
+                matched_steps = [submission.steps[0]] if submission.steps else []
+
+    # Process matched step(s)
+    if matched_steps:
+        matched_step = matched_steps[0]  # Focus on primary match
+        aligned_step = matched_step.step_num
+        aligned_reason = matched_step.step_type or "Step analysis"
+        
+        # Build contextual response based on step state
+        if "error" in prompt_lower or "wrong" in prompt_lower or "mistake" in prompt_lower:
+            if matched_step.error_type:
+                ai_text = f"I found the issue in Step {matched_step.step_num}. The error type is: **{matched_step.error_type}**.\n\n"
+                ai_text += f"**Current work:** {matched_step.text or matched_step.latex}\n\n"
+                ai_text += f"**Analysis:** {matched_step.justification or 'This step contains a logical error.'}\n\n"
+                ai_text += f"**Suggestion:** Review the {matched_step.step_type or 'calculation'} and check your working. The highlighted section shows exactly where the issue occurs."
+            else:
+                ai_text = f"Step {matched_step.step_num} appears to be correct. No errors detected. SymPy validation: {'✓ PASSED' if matched_step.sympy_valid else '✗ NEEDS REVIEW' if matched_step.sympy_valid is False else '⚠ PARTIAL'}"
+                
+        elif "marks" in prompt_lower or "score" in prompt_lower or "why" in prompt_lower:
+            awarded = matched_step.marks_awarded
+            max_marks = matched_step.max_marks
+            percentage = (awarded / max_marks * 100) if max_marks > 0 else 0
+            ai_text = f"**Marks for Step {matched_step.step_num}:** {awarded}/{max_marks} ({percentage:.0f}%)\n\n"
+            ai_text += f"**Type:** {matched_step.step_type or 'Calculation'}\n"
+            ai_text += f"**Status:** {'✓ Full credit' if percentage == 100 else '✓ Partial credit' if percentage > 0 else '✗ No credit'}\n\n"
+            if matched_step.error_type:
+                ai_text += f"**Reason:** {matched_step.error_type}\n"
+            if matched_step.justification:
+                ai_text += f"**Feedback:** {matched_step.justification}"
+                
+        elif "valid" in prompt_lower or "check" in prompt_lower:
+            ai_text = f"**SymPy Validation for Step {matched_step.step_num}:**\n\n"
+            if matched_step.sympy_valid is True:
+                ai_text += f"✓ **VALID** - The algebraic expression is mathematically correct.\n"
+            elif matched_step.sympy_valid is False:
+                ai_text += f"✗ **INVALID** - The algebraic expression contains errors.\n"
+                if matched_step.error_type:
+                    ai_text += f"Error: {matched_step.error_type}\n"
+            else:
+                ai_text += f"⚠ **UNVERIFIED** - Could not be automatically validated.\n"
+            
+            ai_text += f"\n**LaTeX:** `{matched_step.latex or 'N/A'}`\n"
+            ai_text += f"**OCR Text:** {matched_step.text or 'N/A'}"
+            
         else:
-            aligned_step = 1
-            aligned_reason = "Initial formula setup check"
-            ai_text = f"The submission for {student_name} is algebraically robust. I've highlighted Step 1 where they formulated their initial terms. Let me know if you want to inspect a specific step!"
+            # Generic step explanation
+            ai_text = f"**Step {matched_step.step_num} Analysis:** {matched_step.step_type or 'Calculation'}\n\n"
+            ai_text += f"**Work shown:** {matched_step.text or matched_step.latex or 'See highlighted section'}\n\n"
+            ai_text += f"**Assessment:** {matched_step.justification or 'Step reviewed'}\n"
+            ai_text += f"**Score:** {matched_step.marks_awarded}/{matched_step.max_marks}\n\n"
+            if matched_step.error_type:
+                ai_text += f"**⚠ Issue:** {matched_step.error_type}"
+            else:
+                ai_text += f"**✓ Status:** Correct"
+    
+    else:
+        # No specific match - provide general feedback
+        aligned_step = 1
+        aligned_reason = "Overall assessment"
+        
+        total_marks = sum(s.marks_awarded for s in submission.steps)
+        total_max = sum(s.max_marks for s in submission.steps)
+        errors_found = [s for s in submission.steps if s.error_type]
+        
+        ai_text = f"**Overall Submission Analysis for {student_name}:**\n\n"
+        ai_text += f"**Final Score:** {total_marks}/{total_max} ({(total_marks/total_max*100):.0f}%)\n"
+        
+        if errors_found:
+            ai_text += f"**Issues Found:** {len(errors_found)} steps have identified errors\n\n"
+            ai_text += f"**Problem Areas:**\n"
+            for step in errors_found[:3]:  # Show top 3 errors
+                ai_text += f"- Step {step.step_num} ({step.step_type}): {step.error_type}\n"
+            if len(errors_found) > 3:
+                ai_text += f"- ...and {len(errors_found) - 3} more issues\n"
+        else:
+            ai_text += f"**✓ Strengths:** No critical errors detected across {len(submission.steps)} steps\n"
+        
+        ai_text += f"\n**Try asking about:** A specific step number, error types, marks breakdown, or validation status."
 
     return ApiResponse(data={
         "sender": "ai",
         "text": ai_text,
         "alignedStep": aligned_step,
         "alignedReason": aligned_reason
+    })
+
+
+@router.get("/practices", response_model=ApiResponse)
+async def list_practice_history(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Fetch all practice submissions for the current student/user.
+    Returns practice history with scores and metadata.
+    """
+    from sqlalchemy.orm import selectinload
+    query = (
+        select(Practice)
+        .options(selectinload(Practice.grade_results), selectinload(Practice.steps))
+        .filter(Practice.user_id == current_user.id)
+        .order_by(Practice.created_at.desc())
+    )
+    result = await db.execute(query)
+    practices = result.scalars().all()
+
+    items = []
+    for p in practices:
+        score = 0.0
+        max_score = 10.0
+        if p.grade_results:
+            latest_grade = p.grade_results[0]
+            score = float(latest_grade.grade)
+            max_score = float(latest_grade.max_grade)
+
+        # Build steps response
+        steps_list = []
+        for step in p.steps:
+            steps_list.append({
+                "stepNum": step.step_num,
+                "type": step.step_type or "Calculation",
+                "text": step.text or "",
+                "latex": step.latex or "",
+                "sympyValid": step.sympy_valid,
+                "justification": step.justification or "",
+                "marks": step.marks_awarded,
+                "maxMarks": step.max_marks,
+                "errorType": step.error_type,
+                "boundingBox": step.bounding_box
+            })
+
+        items.append({
+            "id": str(p.id),
+            "title": p.title or "Practice Submission",
+            "date": p.created_at.strftime("%Y-%m-%d %H:%M:%S") if p.created_at else "N/A",
+            "rubricName": "Self-Evaluation",
+            "score": score,
+            "maxScore": max_score,
+            "steps": steps_list,
+            "ocrText": p.raw_text
+        })
+
+    return ApiResponse(data=items)
+
+
+@router.post("/practices/grade", response_model=ApiResponse)
+async def grade_practice_submission(
+    file: UploadFile = File(...),
+    rubric: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Grade a practice submission. Accepts file upload and rubric text.
+    Returns the graded practice attempt with steps and scores.
+    
+    Multipart form data:
+    - file: PDF or image file to grade
+    - rubric: Rubric text or rubric name to use for grading
+    """
+
+    # Validate inputs
+    if not file or not rubric:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Both file and rubric are required"
+        )
+
+    # For now, we implement a mock version that stores the practice and returns sample graded results
+    # In production, this would:
+    # 1. Save file to S3
+    # 2. Call diagram-marker service for OCR/parsing
+    # 3. Grade using LLM with provided rubric
+    # 4. Store structured results
+
+    practice = Practice(
+        user_id=current_user.id,
+        file_key=f"s3://practice/{uuid.uuid4()}/{file.filename}",
+        file_name=file.filename,
+        file_type=file.filename.split('.')[-1] if file.filename else "pdf",
+        raw_text="Mock OCR text from uploaded file",
+        status="GRADED",
+        title=f"Practice - {file.filename or 'Submission'}",
+        rubric_json={"text": rubric}
+    )
+
+    db.add(practice)
+    await db.flush()
+
+    # Create mock practice steps
+    mock_step_data = [
+        {
+            "step_num": 1,
+            "step_type": "Initial Setup",
+            "text": "Let x = sin(t)",
+            "latex": "x = \\sin(t)",
+            "marks_awarded": 1.0,
+            "max_marks": 1.0,
+            "sympy_valid": True,
+            "error_type": None,
+            "justification": "Correct substitution choice."
+        },
+        {
+            "step_num": 2,
+            "step_type": "Differential",
+            "text": "dx = cos(t) dt",
+            "latex": "dx = \\cos(t) dt",
+            "marks_awarded": 1.0,
+            "max_marks": 1.0,
+            "sympy_valid": True,
+            "error_type": None,
+            "justification": "Derivative computed correctly."
+        },
+        {
+            "step_num": 3,
+            "step_type": "Integration",
+            "text": "∫ sin²(t) cos(t) dt",
+            "latex": "\\int \\sin^2(t) \\cos(t) dt",
+            "marks_awarded": 2.0,
+            "max_marks": 2.0,
+            "sympy_valid": True,
+            "error_type": None,
+            "justification": "Integration setup is correct."
+        },
+        {
+            "step_num": 4,
+            "step_type": "Final Answer",
+            "text": "= (1/3)sin³(t) + C",
+            "latex": "= \\frac{1}{3}\\sin^3(t) + C",
+            "marks_awarded": 2.0,
+            "max_marks": 2.0,
+            "sympy_valid": True,
+            "error_type": None,
+            "justification": "Final answer is complete with constant of integration."
+        }
+    ]
+
+    # Create practice steps
+    for step_data in mock_step_data:
+        step = PracticeStep(
+            practice_id=practice.id,
+            step_num=step_data["step_num"],
+            step_type=step_data["step_type"],
+            text=step_data["text"],
+            latex=step_data["latex"],
+            marks_awarded=step_data["marks_awarded"],
+            max_marks=step_data["max_marks"],
+            sympy_valid=step_data["sympy_valid"],
+            error_type=step_data["error_type"],
+            justification=step_data["justification"]
+        )
+        db.add(step)
+
+    await db.flush()
+
+    # Create grade result
+    total_marks = sum(s["marks_awarded"] for s in mock_step_data)
+    total_max = sum(s["max_marks"] for s in mock_step_data)
+    
+    step_grades = [
+        {
+            "step_num": s["step_num"],
+            "marks_awarded": s["marks_awarded"],
+            "max_marks": s["max_marks"],
+            "error_type": s["error_type"],
+            "justification": s["justification"]
+        }
+        for s in mock_step_data
+    ]
+
+    grade_result = PracticeGradeResult(
+        practice_id=practice.id,
+        grade=total_marks,
+        max_grade=total_max,
+        confidence=0.92,
+        step_grades=step_grades,
+        model_used="claude-3.5-sonnet",
+        justification="Well-structured solution with correct mathematical reasoning throughout."
+    )
+
+    db.add(grade_result)
+    await db.commit()
+
+    # Build response
+    steps_list = [
+        {
+            "stepNum": step.step_num,
+            "type": step.step_type or "Calculation",
+            "text": step.text or "",
+            "latex": step.latex or "",
+            "sympyValid": step.sympy_valid,
+            "justification": step.justification or "",
+            "marks": step.marks_awarded,
+            "maxMarks": step.max_marks,
+            "errorType": step.error_type,
+            "boundingBox": step.bounding_box
+        }
+        for step in practice.steps
+    ]
+
+    return ApiResponse(data={
+        "id": str(practice.id),
+        "title": practice.title,
+        "date": practice.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "rubricName": "Self-Evaluation",
+        "score": grade_result.grade,
+        "maxScore": grade_result.max_grade,
+        "steps": steps_list,
+        "ocrText": practice.raw_text
     })
