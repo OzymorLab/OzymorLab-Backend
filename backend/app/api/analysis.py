@@ -343,6 +343,7 @@ async def get_submission_analysis_detail(
         "avgClassScore": avg_class_score,
         "avgLatency": avg_latency,
         "questionText": question_text,
+        "fileKey": submission.file_key,
         "steps": steps_list
     }
     
