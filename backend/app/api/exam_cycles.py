@@ -37,7 +37,7 @@ def _require_school(user: User) -> None:
         )
 
 
-@router.post("", dependencies=[Depends(require_role(["admin", "principal"]))])
+@router.post("", dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))])
 async def create_exam_cycle(
     payload: ExamCycleCreate,
     db: AsyncSession = Depends(get_db),
@@ -76,7 +76,7 @@ async def create_exam_cycle(
     ))
 
 
-@router.get("", dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal"]))])
+@router.get("", dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))])
 async def list_exam_cycles(
     status: str | None = None,
     limit: int = Query(50, ge=1, le=100),
@@ -122,7 +122,7 @@ async def list_exam_cycles(
     return ApiResponse(data=items)
 
 
-@router.get("/{cycle_id}", dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal"]))])
+@router.get("/{cycle_id}", dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))])
 async def get_exam_cycle(
     cycle_id: str,
     db: AsyncSession = Depends(get_db),
@@ -172,7 +172,7 @@ async def get_exam_cycle(
     ))
 
 
-@router.patch("/{cycle_id}", dependencies=[Depends(require_role(["admin", "principal"]))])
+@router.patch("/{cycle_id}", dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))])
 async def update_exam_cycle(
     cycle_id: str,
     payload: ExamCycleUpdate,

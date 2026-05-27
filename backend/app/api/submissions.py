@@ -31,7 +31,7 @@ from app.config import settings
 router = APIRouter(
     prefix="/submissions", 
     tags=["Submissions"],
-    dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal"]))]
+    dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))]
 )
 
 

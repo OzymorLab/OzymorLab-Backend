@@ -25,7 +25,7 @@ from app.services.auth_service import (
 router = APIRouter(
     prefix="/question-papers", 
     tags=["Question Papers"],
-    dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal"]))]
+    dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))]
 )
 
 
@@ -224,7 +224,7 @@ async def confirm_question_paper(
 # ── Rubric Approval Workflow ──
 
 @router.post("/{task_id}/rubric/submit-for-approval",
-             dependencies=[Depends(require_role(["teacher", "admin"]))])
+             dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))])
 async def submit_rubric_for_approval(
     task_id: str,
     db: AsyncSession = Depends(get_db),
@@ -273,7 +273,7 @@ async def submit_rubric_for_approval(
 
 
 @router.post("/{task_id}/rubric/approve",
-             dependencies=[Depends(require_role(["hod", "principal", "admin"]))])
+             dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))])
 async def approve_rubric(
     task_id: str,
     db: AsyncSession = Depends(get_db),
@@ -335,7 +335,7 @@ async def approve_rubric(
 
 
 @router.post("/{task_id}/rubric/reject",
-             dependencies=[Depends(require_role(["hod", "principal", "admin"]))])
+             dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))])
 async def reject_rubric(
     task_id: str,
     db: AsyncSession = Depends(get_db),
