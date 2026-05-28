@@ -153,15 +153,15 @@ async def create_classroom(
     db.add(classroom)
     await db.flush()
 
-    # If student emails provided, add classroom student records
-    for email in student_emails:
-        if email.strip():
-            cs = ClassroomStudent(
-                classroom_id=classroom.id,
-                student_email=email.strip().lower(),
-                status="PENDING",
-            )
-            db.add(cs)
+    # If student emails provided, add classroom student records (ensure unique emails)
+    unique_emails = {email.strip().lower() for email in student_emails if email.strip()}
+    for email in unique_emails:
+        cs = ClassroomStudent(
+            classroom_id=classroom.id,
+            student_email=email,
+            status="PENDING",
+        )
+        db.add(cs)
 
     # Assign creating teacher automatically if teacher
     if current_user.role == "teacher":
@@ -225,19 +225,20 @@ async def invite_classroom_students(
     c_uuid = uuid.UUID(classroom_id)
     student_emails = payload.get("student_emails", [])
 
-    for email in student_emails:
-        if email.strip():
-            clean_email = email.strip().lower()
-            # Avoid duplicates
-            dup_stmt = select(ClassroomStudent).filter_by(classroom_id=c_uuid, student_email=clean_email)
-            dup = (await db.execute(dup_stmt)).scalar_one_or_none()
-            if not dup:
-                cs = ClassroomStudent(
-                    classroom_id=c_uuid,
-                    student_email=clean_email,
-                    status="PENDING",
-                )
-                db.add(cs)
+    # Ensure unique emails inside payload
+    unique_emails = {email.strip().lower() for email in student_emails if email.strip()}
+
+    for email in unique_emails:
+        # Avoid duplicates in db
+        dup_stmt = select(ClassroomStudent).filter_by(classroom_id=c_uuid, student_email=email)
+        dup = (await db.execute(dup_stmt)).scalar_one_or_none()
+        if not dup:
+            cs = ClassroomStudent(
+                classroom_id=c_uuid,
+                student_email=email,
+                status="PENDING",
+            )
+            db.add(cs)
 
     await db.commit()
     return ApiResponse(data={"message": "Students invited successfully."})
