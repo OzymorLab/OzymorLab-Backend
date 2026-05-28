@@ -20,9 +20,13 @@ router = APIRouter(
 )
 
 async def _get_student_for_user(user: User, db: AsyncSession) -> Optional[Student]:
-    """Helper to find the student database record matching the logged-in User's full_name."""
+    """Helper to find the student database record matching the logged-in User's full_name or email prefix."""
+    email_name = user.email.split("@")[0].replace(".", " ").title()
     result = await db.execute(
-        select(Student).filter(func.lower(Student.name) == func.lower(user.full_name))
+        select(Student).filter(
+            (func.lower(Student.name) == func.lower(user.full_name)) |
+            (func.lower(Student.name) == func.lower(email_name))
+        )
     )
     return result.scalar_one_or_none()
 
