@@ -100,6 +100,7 @@ from app.api.exam_cycles import router as exam_cycles_router
 from app.api.schools import router as schools_router
 from app.api.reports import router as reports_router
 from app.api.analysis import router as analysis_router
+from app.api.classroom import router as classroom_router
 
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
@@ -112,6 +113,8 @@ app.include_router(exam_cycles_router, prefix="/api/v1")
 app.include_router(schools_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 app.include_router(analysis_router, prefix="/api/v1")
+app.include_router(classroom_router, prefix="/api/v1")
+
 
 
 @app.get("/", tags=["Root"])

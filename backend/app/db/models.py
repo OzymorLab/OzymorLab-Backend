@@ -507,3 +507,85 @@ class PracticeGradeResult(Base):
         Index("idx_practice_grade_results_practice_id", "practice_id"),
     )
 
+
+class ClassroomInvite(Base):
+    """Classroom invitation sent by a teacher/admin to a student."""
+    __tablename__ = "classroom_invites"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id"), nullable=False, index=True)
+    student_name = Column(String(255), nullable=False)
+    subject = Column(String(255), nullable=False)
+    teacher = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False, default="PENDING")  # PENDING | ACCEPTED | DECLINED
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    # Relationships
+    student = relationship("Student", foreign_keys=[student_id])
+
+
+class ClassroomWorksheet(Base):
+    """Worksheet assigned to a student in an active classroom."""
+    __tablename__ = "classroom_worksheets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    student_id = Column(UUID(as_uuid=True), ForeignKey("students.id"), nullable=False, index=True)
+    title = Column(String(500), nullable=False)
+    subject = Column(String(100), nullable=False)
+    teacher = Column(String(255), nullable=False)
+    due_date = Column(String(20), nullable=False)
+    status = Column(String(20), nullable=False, default="PENDING")  # PENDING | GRADED
+    grade = Column(String(20), nullable=True)
+    questions = Column(JSONB, nullable=False, default=list)  # array of questions
+    answers = Column(JSONB, nullable=True)  # student answers mapping
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    # Relationships
+    student = relationship("Student", foreign_keys=[student_id])
+
+
+class Classroom(Base):
+    """A classroom subject/standard instance."""
+    __tablename__ = "classrooms"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    subject = Column(String(255), nullable=False)
+    class_name = Column(String(255), nullable=False)
+    session = Column(String(255), nullable=False)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+
+    # Relationships
+    creator = relationship("User", foreign_keys=[created_by])
+
+
+class ClassroomTeacher(Base):
+    """Teacher assignment mapping to a classroom."""
+    __tablename__ = "classroom_teachers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    classroom_id = Column(UUID(as_uuid=True), ForeignKey("classrooms.id", ondelete="CASCADE"), nullable=False, index=True)
+    teacher_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Relationships
+    classroom = relationship("Classroom", foreign_keys=[classroom_id])
+    teacher = relationship("User", foreign_keys=[teacher_id])
+
+
+class ClassroomStudent(Base):
+    """Student membership to a classroom (by email to support invitations)."""
+    __tablename__ = "classroom_students"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    classroom_id = Column(UUID(as_uuid=True), ForeignKey("classrooms.id", ondelete="CASCADE"), nullable=False, index=True)
+    student_email = Column(String(255), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="PENDING")  # PENDING | ACCEPTED | REJECTED
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    # Relationships
+    classroom = relationship("Classroom", foreign_keys=[classroom_id])
+
+
+
