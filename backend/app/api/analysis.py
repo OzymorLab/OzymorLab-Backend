@@ -431,26 +431,31 @@ async def chat_analysis_copilot(
     """
     try:
         sub_uuid = uuid.UUID(submission_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
-
-    # BOLA / IDOR isolation check
-    await check_submission_access(sub_uuid, current_user, db)
-
-    from sqlalchemy.orm import selectinload
-    query = (
-        select(Submission)
-        .options(selectinload(Submission.student), selectinload(Submission.steps), selectinload(Submission.task))
-        .filter(Submission.id == sub_uuid)
-    )
-    result = await db.execute(query)
-    submission = result.scalar_one_or_none()
-    
-    if not submission:
-        raise HTTPException(status_code=404, detail="Submission not found")
+        # BOLA / IDOR isolation check
+        await check_submission_access(sub_uuid, current_user, db)
         
-    student_name = submission.student.name if submission.student else "the student"
+        from sqlalchemy.orm import selectinload
+        query = (
+            select(Submission)
+            .options(selectinload(Submission.student), selectinload(Submission.steps), selectinload(Submission.task))
+            .filter(Submission.id == sub_uuid)
+        )
+        result = await db.execute(query)
+        submission = result.scalar_one_or_none()
+    except (ValueError, HTTPException):
+        submission = None
+
     prompt_lower = payload.message.lower()
+    
+    # Extract Context if passed by frontend
+    question_context = ""
+    clean_message = payload.message
+    if "[Context - Question:" in payload.message:
+        parts = payload.message.split("[Context - Question:")
+        clean_message = parts[0].strip()
+        question_context = parts[1].split("]")[0].strip()
+        
+    student_name = submission.student.name if (submission and submission.student) else "the student"
     
     # Default outputs
     aligned_step = None
@@ -461,134 +466,44 @@ async def chat_analysis_copilot(
     # ENHANCED SEMANTIC MATCHING
     # ─────────────────────────────────────────
     
-    # Keywords for error types
-    error_keywords = {
-        "sign": ["sign", "negative", "positive", "+", "-"],
-        "arithmetic": ["arithmetic", "calculation", "computed", "wrong answer", "result"],
-        "notation": ["notation", "constant", "missing", "format"],
-        "strategy": ["strategy", "approach", "method", "technique"],
-        "algebraic": ["algebra", "algebraic", "expand", "simplify"],
-    }
-    
-    # Keywords for specific questions
-    question_keywords = {
-        "error": ["error", "mistake", "wrong", "incorrect", "issue", "problem"],
-        "validity": ["valid", "check", "sympy", "computational", "algebra"],
-        "marks": ["marks", "score", "points", "grade", "deduction"],
-        "step": ["step", "part", "section", "line"],
-        "integration": ["integrat", "integral"],
-        "derivat": ["deriv", "derivative", "differential"],
-        "substitut": ["substit", "substitute"],
-        "constant": ["constant", "c", "+ c", "integration constant"],
-    }
+    # If submission is missing or we want an LLM answer, use the LLM
+    from app.services.llm_client import call_gemini
     
     # Check for specific step number mentions
     target_step = None
-    for i in range(1, len(submission.steps) + 1):
-        if f"step {i}" in prompt_lower or (["one", "two", "three", "four", "five"][i-1] if i <= 5 else "") in prompt_lower:
-            target_step = i
-            break
-    
-    # Find matching steps if no specific step mentioned
-    if target_step:
-        matched_steps = [s for s in submission.steps if s.step_num == target_step]
-    else:
-        # Search for steps with mentioned error types
-        matched_steps = []
-        for step in submission.steps:
-            for error_type, keywords in error_keywords.items():
-                if any(kw in prompt_lower for kw in keywords):
-                    if step.error_type and error_type.lower() in step.error_type.lower():
-                        matched_steps.append(step)
-            # Also match by sympy validity if asking about validity
-            if "valid" in prompt_lower or "check" in prompt_lower:
-                if step.sympy_valid is not None:
-                    matched_steps.append(step)
-        
-        # If still no matches, find first error
-        if not matched_steps:
-            invalid_step = next((s for s in submission.steps if s.sympy_valid is False or s.error_type), None)
-            if invalid_step:
-                matched_steps = [invalid_step]
-            else:
-                matched_steps = [submission.steps[0]] if submission.steps else []
+    if submission:
+        for i in range(1, len(submission.steps) + 1):
+            if f"step {i}" in prompt_lower or (["one", "two", "three", "four", "five"][i-1] if i <= 5 else "") in prompt_lower:
+                target_step = i
+                break
 
-    # Process matched step(s)
-    if matched_steps:
-        matched_step = matched_steps[0]  # Focus on primary match
-        aligned_step = matched_step.step_num
-        aligned_reason = matched_step.step_type or "Step analysis"
-        
-        # Build contextual response based on step state
-        if "error" in prompt_lower or "wrong" in prompt_lower or "mistake" in prompt_lower:
-            if matched_step.error_type:
-                ai_text = f"I found the issue in Step {matched_step.step_num}. The error type is: **{matched_step.error_type}**.\n\n"
-                ai_text += f"**Current work:** {matched_step.text or matched_step.latex}\n\n"
-                ai_text += f"**Analysis:** {matched_step.justification or 'This step contains a logical error.'}\n\n"
-                ai_text += f"**Suggestion:** Review the {matched_step.step_type or 'calculation'} and check your working. The highlighted section shows exactly where the issue occurs."
-            else:
-                ai_text = f"Step {matched_step.step_num} appears to be correct. No errors detected. SymPy validation: {'✓ PASSED' if matched_step.sympy_valid else '✗ NEEDS REVIEW' if matched_step.sympy_valid is False else '⚠ PARTIAL'}"
-                
-        elif "marks" in prompt_lower or "score" in prompt_lower or "why" in prompt_lower:
-            awarded = matched_step.marks_awarded
-            max_marks = matched_step.max_marks
-            percentage = (awarded / max_marks * 100) if max_marks > 0 else 0
-            ai_text = f"**Marks for Step {matched_step.step_num}:** {awarded}/{max_marks} ({percentage:.0f}%)\n\n"
-            ai_text += f"**Type:** {matched_step.step_type or 'Calculation'}\n"
-            ai_text += f"**Status:** {'✓ Full credit' if percentage == 100 else '✓ Partial credit' if percentage > 0 else '✗ No credit'}\n\n"
-            if matched_step.error_type:
-                ai_text += f"**Reason:** {matched_step.error_type}\n"
-            if matched_step.justification:
-                ai_text += f"**Feedback:** {matched_step.justification}"
-                
-        elif "valid" in prompt_lower or "check" in prompt_lower:
-            ai_text = f"**SymPy Validation for Step {matched_step.step_num}:**\n\n"
-            if matched_step.sympy_valid is True:
-                ai_text += f"✓ **VALID** - The algebraic expression is mathematically correct.\n"
-            elif matched_step.sympy_valid is False:
-                ai_text += f"✗ **INVALID** - The algebraic expression contains errors.\n"
-                if matched_step.error_type:
-                    ai_text += f"Error: {matched_step.error_type}\n"
-            else:
-                ai_text += f"⚠ **UNVERIFIED** - Could not be automatically validated.\n"
-            
-            ai_text += f"\n**LaTeX:** `{matched_step.latex or 'N/A'}`\n"
-            ai_text += f"**OCR Text:** {matched_step.text or 'N/A'}"
-            
-        else:
-            # Generic step explanation
-            ai_text = f"**Step {matched_step.step_num} Analysis:** {matched_step.step_type or 'Calculation'}\n\n"
-            ai_text += f"**Work shown:** {matched_step.text or matched_step.latex or 'See highlighted section'}\n\n"
-            ai_text += f"**Assessment:** {matched_step.justification or 'Step reviewed'}\n"
-            ai_text += f"**Score:** {matched_step.marks_awarded}/{matched_step.max_marks}\n\n"
-            if matched_step.error_type:
-                ai_text += f"**⚠ Issue:** {matched_step.error_type}"
-            else:
-                ai_text += f"**✓ Status:** Correct"
-    
-    else:
-        # No specific match - provide general feedback
-        aligned_step = 1
-        aligned_reason = "Overall assessment"
-        
+    # Build prompt for LLM
+    sys_prompt = "You are OzymorLab, an expert AI Teaching Assistant. Provide concise, helpful, and educational answers to the student's doubts. Do not penalize or deduct marks for minor verbosity or structural omissions. Always be encouraging."
+    llm_prompt = f"User Question/Doubt: {clean_message}\n\n"
+    if question_context:
+        llm_prompt += f"Context (Exam Question): {question_context}\n\n"
+    if submission:
         total_marks = sum(s.marks_awarded for s in submission.steps)
         total_max = sum(s.max_marks for s in submission.steps)
-        errors_found = [s for s in submission.steps if s.error_type]
-        
-        ai_text = f"**Overall Submission Analysis for {student_name}:**\n\n"
-        ai_text += f"**Final Score:** {total_marks}/{total_max} ({(total_marks/total_max*100):.0f}%)\n"
-        
-        if errors_found:
-            ai_text += f"**Issues Found:** {len(errors_found)} steps have identified errors\n\n"
-            ai_text += f"**Problem Areas:**\n"
-            for step in errors_found[:3]:  # Show top 3 errors
-                ai_text += f"- Step {step.step_num} ({step.step_type}): {step.error_type}\n"
-            if len(errors_found) > 3:
-                ai_text += f"- ...and {len(errors_found) - 3} more issues\n"
+        llm_prompt += f"Student's Current Score: {total_marks}/{total_max}\n"
+        if target_step:
+            step_data = next((s for s in submission.steps if s.step_num == target_step), None)
+            if step_data:
+                llm_prompt += f"Context about Step {target_step}:\nWork: {step_data.text or step_data.latex}\nFeedback: {step_data.justification}\n"
         else:
-            ai_text += f"**✓ Strengths:** No critical errors detected across {len(submission.steps)} steps\n"
+            errors = [s for s in submission.steps if s.error_type]
+            if errors:
+                llm_prompt += "Known Errors in Student's Work:\n"
+                for e in errors[:3]:
+                    llm_prompt += f"- Step {e.step_num}: {e.error_type}\n"
+
+    llm_res = call_gemini(llm_prompt, system_prompt=sys_prompt, max_tokens=400)
+    
+    ai_text = llm_res.get("response_text", "I'm here to help! Could you clarify your question?")
+    aligned_step = target_step or (1 if not submission else None)
+    aligned_reason = "AI Assistant Analysis"
         
-        ai_text += f"\n**Try asking about:** A specific step number, error types, marks breakdown, or validation status."
+
 
     return ApiResponse(data={
         "sender": "ai",
