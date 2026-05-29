@@ -7,6 +7,7 @@ import io
 import logging
 import statistics
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
