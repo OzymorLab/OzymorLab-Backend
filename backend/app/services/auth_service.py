@@ -264,7 +264,7 @@ def require_role(allowed_roles: list[str]):
 
 # ── BOLA / IDOR Tenant Isolation Check Helpers ──
 from sqlalchemy.orm import selectinload, joinedload
-from app.db.models import Task, Submission, GradingRun, Student, ExamCycle, SchoolClass, Section
+from app.db.models import Task, Submission, GradingRun, Student, ExamCycle, SchoolClass, Section, ClassroomWorksheet
 
 async def check_task_access(task_id: uuid.UUID, user: User, db: AsyncSession) -> Task:
     """Check if task belongs to the user's school and return the task."""

@@ -194,7 +194,7 @@ async def export_submissions_csv(
     writer.writerow(["Submission ID", "Student ID", "File Name", "Status", "Total Marks", "Created At"])
 
     for s in submissions:
-        total_marks = sum(r.marks_awarded for r in s.grade_results) if s.grade_results else 0.0
+        total_marks = sum(r.grade for r in s.grade_results) if s.grade_results else 0.0
         writer.writerow([str(s.id), str(s.student_id), s.file_name, s.status, total_marks, s.created_at.isoformat()])
 
     output.seek(0)
