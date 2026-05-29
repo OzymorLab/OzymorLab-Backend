@@ -302,6 +302,36 @@ async def check_submission_access(submission_id: uuid.UUID, user: User, db: Asyn
     )
     sub = result.scalar_one_or_none()
     if not sub:
+        # Fallback: check if this is a classroom worksheet
+        ws_result = await db.execute(
+            select(ClassroomWorksheet)
+            .options(joinedload(ClassroomWorksheet.student).joinedload(Student.section).joinedload(Section.school_class))
+            .filter_by(id=submission_id)
+        )
+        ws = ws_result.scalar_one_or_none()
+        if ws:
+            # Student Role Isolation: Enforce student only views their own worksheet
+            if user.role == "student":
+                from sqlalchemy import func
+                email_name = user.email.split("@")[0].replace(".", " ").title()
+                student_stmt = select(Student).filter(
+                    (Student.id == user.id) |
+                    (func.lower(Student.name) == func.lower(user.full_name)) |
+                    (func.lower(Student.name) == func.lower(email_name))
+                )
+                student_res = await db.execute(student_stmt)
+                students = student_res.scalars().all()
+                student_ids = {s.id for s in students}
+                student_ids.add(user.id)
+                
+                if ws.student_id not in student_ids:
+                    raise HTTPException(status_code=403, detail="Access denied: Students can only access their own worksheets")
+                    
+            if user.school_id is not None:
+                if ws.student and ws.student.section and ws.student.section.school_class and ws.student.section.school_class.school_id and ws.student.section.school_class.school_id != user.school_id:
+                    raise HTTPException(status_code=403, detail="Access denied: Worksheet student belongs to another school")
+            return ws
+            
         raise HTTPException(status_code=404, detail="Submission not found")
         
     # Student Role Isolation: Enforce student only views their own submission
