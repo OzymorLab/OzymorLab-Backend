@@ -284,20 +284,14 @@ async def check_task_access(task_id: uuid.UUID, user: User, db: AsyncSession) ->
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    if task.exam_cycle and task.exam_cycle.school_id != user.school_id:
+    # Safe isolation check: only deny if both have non-null, different school IDs
+    if task.exam_cycle and task.exam_cycle.school_id and task.exam_cycle.school_id != user.school_id:
         raise HTTPException(status_code=403, detail="Access denied: Task belongs to another school")
     
     return task
 
 async def check_submission_access(submission_id: uuid.UUID, user: User, db: AsyncSession) -> Submission:
     """Check if submission belongs to the user's school and return it."""
-    if user.school_id is None:
-        result = await db.execute(select(Submission).filter_by(id=submission_id))
-        sub = result.scalar_one_or_none()
-        if not sub:
-            raise HTTPException(status_code=404, detail="Submission not found")
-        return sub
-
     result = await db.execute(
         select(Submission)
         .options(
@@ -309,14 +303,32 @@ async def check_submission_access(submission_id: uuid.UUID, user: User, db: Asyn
     sub = result.scalar_one_or_none()
     if not sub:
         raise HTTPException(status_code=404, detail="Submission not found")
-    
-    # Verify through task's exam cycle if exists
-    if sub.task and sub.task.exam_cycle and sub.task.exam_cycle.school_id != user.school_id:
-        raise HTTPException(status_code=403, detail="Access denied: Submission belongs to another school")
         
-    # Or verify through student class
-    if sub.student and sub.student.section and sub.student.section.school_class and sub.student.section.school_class.school_id != user.school_id:
-        raise HTTPException(status_code=403, detail="Access denied: Student belongs to another school")
+    # Student Role Isolation: Enforce student only views their own submission
+    if user.role == "student":
+        from sqlalchemy import func
+        email_name = user.email.split("@")[0].replace(".", " ").title()
+        student_stmt = select(Student).filter(
+            (Student.id == user.id) |
+            (func.lower(Student.name) == func.lower(user.full_name)) |
+            (func.lower(Student.name) == func.lower(email_name))
+        )
+        student_res = await db.execute(student_stmt)
+        students = student_res.scalars().all()
+        student_ids = {s.id for s in students}
+        student_ids.add(user.id)
+        
+        if sub.student_id not in student_ids:
+            raise HTTPException(status_code=403, detail="Access denied: Students can only access their own submissions")
+            
+    if user.school_id is not None:
+        # Verify through task's exam cycle if exists and has a school_id
+        if sub.task and sub.task.exam_cycle and sub.task.exam_cycle.school_id and sub.task.exam_cycle.school_id != user.school_id:
+            raise HTTPException(status_code=403, detail="Access denied: Submission belongs to another school")
+            
+        # Or verify through student class if exists and has a school_id
+        if sub.student and sub.student.section and sub.student.section.school_class and sub.student.section.school_class.school_id and sub.student.section.school_class.school_id != user.school_id:
+            raise HTTPException(status_code=403, detail="Access denied: Student belongs to another school")
 
     return sub
 
@@ -338,20 +350,13 @@ async def check_run_access(run_id: uuid.UUID, user: User, db: AsyncSession) -> G
     if not run:
         raise HTTPException(status_code=404, detail="Grading run not found")
 
-    if run.task and run.task.exam_cycle and run.task.exam_cycle.school_id != user.school_id:
+    if run.task and run.task.exam_cycle and run.task.exam_cycle.school_id and run.task.exam_cycle.school_id != user.school_id:
         raise HTTPException(status_code=403, detail="Access denied: Grading run belongs to another school")
 
     return run
 
 async def check_student_access(student_id: uuid.UUID, user: User, db: AsyncSession) -> Student:
     """Check if student belongs to the user's school and return it."""
-    if user.school_id is None:
-        result = await db.execute(select(Student).filter_by(id=student_id))
-        student = result.scalar_one_or_none()
-        if not student:
-            raise HTTPException(status_code=404, detail="Student not found")
-        return student
-
     result = await db.execute(
         select(Student)
         .options(joinedload(Student.section).joinedload(Section.school_class))
@@ -361,8 +366,25 @@ async def check_student_access(student_id: uuid.UUID, user: User, db: AsyncSessi
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    if student.section and student.section.school_class and student.section.school_class.school_id != user.school_id:
-        raise HTTPException(status_code=403, detail="Access denied: Student belongs to another school")
+    if user.role == "student":
+        from sqlalchemy import func
+        email_name = user.email.split("@")[0].replace(".", " ").title()
+        student_stmt = select(Student).filter(
+            (Student.id == user.id) |
+            (func.lower(Student.name) == func.lower(user.full_name)) |
+            (func.lower(Student.name) == func.lower(email_name))
+        )
+        student_res = await db.execute(student_stmt)
+        students = student_res.scalars().all()
+        student_ids = {s.id for s in students}
+        student_ids.add(user.id)
+        
+        if student_id not in student_ids:
+            raise HTTPException(status_code=403, detail="Access denied: Students can only access their own student profile")
+
+    if user.school_id is not None:
+        if student.section and student.section.school_class and student.section.school_class.school_id and student.section.school_class.school_id != user.school_id:
+            raise HTTPException(status_code=403, detail="Access denied: Student belongs to another school")
 
     return student
 

@@ -226,6 +226,22 @@ async def list_submissions(
         # BOLA / IDOR isolation check
         await check_task_access(task_uuid, current_user, db)
         query = query.filter_by(task_id=task_uuid)
+    
+    # Enforce student-level isolation for the list endpoint as well
+    if current_user.role == "student":
+        from sqlalchemy import func
+        email_name = current_user.email.split("@")[0].replace(".", " ").title()
+        student_stmt = select(Student).filter(
+            (Student.id == current_user.id) |
+            (func.lower(Student.name) == func.lower(current_user.full_name)) |
+            (func.lower(Student.name) == func.lower(email_name))
+        )
+        student_res = await db.execute(student_stmt)
+        students = student_res.scalars().all()
+        student_ids = [s.id for s in students]
+        student_ids.append(current_user.id)
+        query = query.filter(Submission.student_id.in_(student_ids))
+
     if status:
         query = query.filter_by(status=status)
         

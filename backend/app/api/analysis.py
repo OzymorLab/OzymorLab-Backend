@@ -73,6 +73,7 @@ class RosterItemResponse(BaseModel):
 
 class ScoreOverrideRequest(BaseModel):
     amount: float = Field(..., description="Change in marks (e.g. +0.5 or -0.5)")
+    step_num: Optional[int] = Field(None, description="Optional step number to adjust marks for")
 
 class ChatMessageRequest(BaseModel):
     message: str
@@ -194,11 +195,16 @@ async def list_task_roster(
     for s in submissions:
         # Resolve Student
         student_obj = s.student
-        if not student_obj:
-            continue
+        if student_obj:
+            student_id = str(student_obj.id)
+            name = student_obj.name
+        else:
+            # Fallback to generating a student name from student_id or user/file metadata
+            name = s.student_id or f"Student {s.file_name.split('.')[0]}"
+            if name.upper().startswith("STUDENT-"):
+                name = name[8:].replace("-", " ").title()
+            student_id = s.student_id or str(s.id)
             
-        student_id = str(student_obj.id)
-        name = student_obj.name
         # Simple initials for avatar
         avatar = "".join([part[0] for part in name.split() if part])[:2].upper()
         
@@ -280,8 +286,15 @@ async def get_submission_analysis_detail(
         raise HTTPException(status_code=404, detail="Submission not found")
         
     student = submission.student
-    student_name = student.name if student else "Unknown"
-    student_id = str(student.id) if student else "N/A"
+    if student:
+        student_name = student.name
+        student_id = str(student.id)
+    else:
+        student_name = submission.student_id or f"Student {submission.file_name.split('.')[0]}"
+        if student_name.upper().startswith("STUDENT-"):
+            student_name = student_name[8:].replace("-", " ").title()
+        student_id = submission.student_id or str(submission.id)
+        
     avatar = "".join([part[0] for part in student_name.split() if part])[:2].upper()
     
     # Grade Result metadata
@@ -385,29 +398,46 @@ async def override_submission_marks(
     if not grade_result:
         raise HTTPException(status_code=404, detail="Grade result not found")
 
+    # 2. Adjust specific step marks
+    target_step_num = payload.step_num
+    if target_step_num is not None:
+        steps_res = await db.execute(
+            select(SubmissionStep)
+            .filter(and_(
+                SubmissionStep.submission_id == sub_uuid,
+                SubmissionStep.step_num == target_step_num
+            ))
+        )
+    else:
+        steps_res = await db.execute(
+            select(SubmissionStep)
+            .filter(SubmissionStep.submission_id == sub_uuid)
+            .order_by(SubmissionStep.step_num.desc()).limit(1)
+        )
+    step_to_adjust = steps_res.scalar_one_or_none()
+    
+    actual_step_change = payload.amount
+    if step_to_adjust:
+        old_step_marks = step_to_adjust.marks_awarded
+        new_step_marks = max(0.0, min(float(step_to_adjust.max_marks), float(old_step_marks) + payload.amount))
+        actual_step_change = new_step_marks - old_step_marks
+        step_to_adjust.marks_awarded = new_step_marks
+        
+        # Sync grade_result JSONB steps
+        if grade_result.step_grades:
+            step_grades_copy = list(grade_result.step_grades)
+            for sg in step_grades_copy:
+                if sg.get("step_num") == step_to_adjust.step_num:
+                    sg["marks_awarded"] = new_step_marks
+                    break
+            grade_result.step_grades = step_grades_copy
+
     # Update overall grade
     old_grade = grade_result.grade
-    new_grade = max(0.0, min(float(grade_result.max_grade), float(old_grade) + payload.amount))
+    new_grade = max(0.0, min(float(grade_result.max_grade), float(old_grade) + actual_step_change))
     grade_result.grade = int(new_grade) # Cast to int for schema consistency
     grade_result.review_status = "OVERRIDDEN"
-    grade_result.review_notes = f"Teacher overridden score from {old_grade} to {new_grade} using interactive marks stepper."
-    
-    # 2. Proportionally adjust the last step's marks in both table and JSONB to keep them in sync
-    steps_res = await db.execute(
-        select(SubmissionStep)
-        .filter(SubmissionStep.submission_id == sub_uuid)
-        .order_by(SubmissionStep.step_num.desc()).limit(1)
-    )
-    last_step = steps_res.scalar_one_or_none()
-    if last_step:
-        last_step.marks_awarded = max(0.0, min(float(last_step.max_marks), float(last_step.marks_awarded) + payload.amount))
-
-    # Also sync grade_result JSONB steps
-    if grade_result.step_grades:
-        step_grades_copy = list(grade_result.step_grades)
-        if len(step_grades_copy) > 0:
-            step_grades_copy[-1]["marks_awarded"] = max(0.0, step_grades_copy[-1]["marks_awarded"] + payload.amount)
-            grade_result.step_grades = step_grades_copy
+    grade_result.review_notes = f"Teacher overridden step {target_step_num or 'last'} score from {old_grade} to {new_grade}."
             
     await db.commit()
     
