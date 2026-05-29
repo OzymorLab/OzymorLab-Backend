@@ -285,24 +285,22 @@ async def get_submission_grade(submission_id: str, db: AsyncSession = Depends(ge
             for idx, q in enumerate(sub_or_ws.questions):
                 step_grades.append(StepGradeResult(
                     step_num=idx + 1,
-                    marks_awarded=round(score / q_count, 1) if q_count > 0 else 0.0,
-                    max_marks=round(100.0 / q_count, 1) if q_count > 0 else 0.0,
+                    marks_awarded=int(round(score / q_count)) if q_count > 0 else 0,
+                    max_marks=int(round(100.0 / q_count)) if q_count > 0 else 0,
+                    grade_distribution=[1.0],
                     justification="Evaluation completed successfully.",
                     error_type=None,
-                    sympy_valid=True,
-                    step_type="Solution",
-                    bounding_box=None
+                    sympy_valid=True
                 ))
         else:
             step_grades.append(StepGradeResult(
                 step_num=1,
-                marks_awarded=score,
-                max_marks=100.0,
+                marks_awarded=int(score),
+                max_marks=100,
+                grade_distribution=[1.0],
                 justification="Worksheet graded.",
                 error_type=None,
-                sympy_valid=True,
-                step_type="Solution",
-                bounding_box=None
+                sympy_valid=True
             ))
             
         response = GradeResultResponse(
