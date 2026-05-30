@@ -12,7 +12,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, update
 from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
@@ -26,6 +26,7 @@ from app.db.models import (
     ClassroomTeacher,
     ClassroomStudent,
     ClassroomWorksheet,
+    ClassroomInvite,
     ExamCycle,
     Task,
     Submission,
@@ -137,16 +138,46 @@ async def get_school_overview(
         )
     )).scalar() or 0
 
-    total_classrooms = (await db.execute(select(func.count(Classroom.id)))).scalar() or 0
+    total_classrooms = (await db.execute(
+        select(func.count(Classroom.id))
+        .join(User, Classroom.created_by == User.id)
+        .filter(User.school_id == school_id)
+    )).scalar() or 0
     total_exams = (await db.execute(select(func.count(ExamCycle.id)).filter_by(school_id=school_id))).scalar() or 0
 
-    total_assignments = (await db.execute(select(func.count(Task.id)))).scalar() or 0
+    task_count = (await db.execute(
+        select(func.count(Task.id))
+        .join(ExamCycle, Task.exam_cycle_id == ExamCycle.id)
+        .filter(ExamCycle.school_id == school_id)
+    )).scalar() or 0
+    worksheet_count = (await db.execute(
+        select(func.count(ClassroomWorksheet.id))
+        .join(Student, ClassroomWorksheet.student_id == Student.id)
+        .join(Section, Student.section_id == Section.id)
+        .join(SchoolClass, Section.class_id == SchoolClass.id)
+        .filter(SchoolClass.school_id == school_id)
+    )).scalar() or 0
+    total_assignments = task_count + worksheet_count
     active_assignments = (await db.execute(
-        select(func.count(ClassroomWorksheet.id)).filter(ClassroomWorksheet.status.in_(["PENDING", "GRADED"]))
+        select(func.count(ClassroomWorksheet.id))
+        .join(Student, ClassroomWorksheet.student_id == Student.id)
+        .join(Section, Student.section_id == Section.id)
+        .join(SchoolClass, Section.class_id == SchoolClass.id)
+        .filter(
+            and_(
+                SchoolClass.school_id == school_id,
+                ClassroomWorksheet.status.in_(["PENDING", "GRADED"]),
+            )
+        )
     )).scalar() or 0
 
     submission_status_rows = (await db.execute(
-        select(Submission.status, func.count(Submission.id)).group_by(Submission.status)
+        select(Submission.status, func.count(Submission.id))
+        .join(Student, Submission.student_id == Student.id)
+        .join(Section, Student.section_id == Section.id)
+        .join(SchoolClass, Section.class_id == SchoolClass.id)
+        .filter(SchoolClass.school_id == school_id)
+        .group_by(Submission.status)
     )).all()
     pipeline = {
         "pending": 0,
@@ -168,7 +199,14 @@ async def get_school_overview(
         elif key == "failed":
             pipeline["failed"] += count
 
-    grade_rows = (await db.execute(select(GradeResult.grade, GradeResult.max_grade))).all()
+    grade_rows = (await db.execute(
+        select(GradeResult.grade, GradeResult.max_grade)
+        .join(Submission, GradeResult.submission_id == Submission.id)
+        .join(Student, Submission.student_id == Student.id)
+        .join(Section, Student.section_id == Section.id)
+        .join(SchoolClass, Section.class_id == SchoolClass.id)
+        .filter(SchoolClass.school_id == school_id)
+    )).all()
     grade_distribution = {"excellent": 0, "good": 0, "average": 0, "below": 0}
     for grade, max_grade in grade_rows:
         pct = (grade / max_grade * 100) if max_grade else 0
@@ -186,6 +224,11 @@ async def get_school_overview(
             func.to_char(GradeResult.graded_at, "Mon YYYY"),
             func.avg((GradeResult.grade * 100.0) / func.nullif(GradeResult.max_grade, 0)),
         )
+        .join(Submission, GradeResult.submission_id == Submission.id)
+        .join(Student, Submission.student_id == Student.id)
+        .join(Section, Student.section_id == Section.id)
+        .join(SchoolClass, Section.class_id == SchoolClass.id)
+        .filter(SchoolClass.school_id == school_id)
         .group_by(func.to_char(GradeResult.graded_at, "Mon YYYY"), func.date_trunc("month", GradeResult.graded_at))
         .order_by(func.date_trunc("month", GradeResult.graded_at))
         .limit(12)
@@ -196,7 +239,12 @@ async def get_school_overview(
     ]
 
     recent_runs = (await db.execute(
-        select(GradingRun).order_by(GradingRun.created_at.desc()).limit(8)
+        select(GradingRun)
+        .join(Task, GradingRun.task_id == Task.id)
+        .join(ExamCycle, Task.exam_cycle_id == ExamCycle.id)
+        .filter(ExamCycle.school_id == school_id)
+        .order_by(GradingRun.created_at.desc())
+        .limit(8)
     )).scalars().all()
 
     return ApiResponse(data={
@@ -242,6 +290,7 @@ async def list_school_teachers(
         .filter(
             and_(
                 User.school_id == current_user.school_id,
+                User.is_active.is_(True),
                 User.role.in_(["teacher", "hod", "admin", "principal"]),
             )
         )
@@ -621,6 +670,13 @@ async def remove_student(
     """Remove a student from the school roster."""
     _require_school(current_user)
     student = await _get_school_student(db, current_user.school_id, student_id)
+    await db.execute(
+        update(Submission)
+        .where(Submission.student_id == student.id)
+        .values(student_id=None)
+    )
+    await db.execute(ClassroomWorksheet.__table__.delete().where(ClassroomWorksheet.student_id == student.id))
+    await db.execute(ClassroomInvite.__table__.delete().where(ClassroomInvite.student_id == student.id))
     await db.delete(student)
     return ApiResponse(data={"message": "Student removed successfully."})
 
@@ -633,7 +689,12 @@ async def list_school_classrooms(
     """Monitor all classrooms visible to the school admin."""
     _require_school(current_user)
 
-    result = await db.execute(select(Classroom).order_by(Classroom.created_at.desc()))
+    result = await db.execute(
+        select(Classroom)
+        .join(User, Classroom.created_by == User.id)
+        .filter(User.school_id == current_user.school_id)
+        .order_by(Classroom.created_at.desc())
+    )
     classrooms = result.scalars().all()
     items = []
     for classroom in classrooms:
@@ -647,7 +708,16 @@ async def list_school_classrooms(
             select(ClassroomStudent).filter_by(classroom_id=classroom.id)
         )).scalars().all()
         worksheets_count = (await db.execute(
-            select(func.count(ClassroomWorksheet.id)).filter_by(subject=classroom.subject)
+            select(func.count(ClassroomWorksheet.id))
+            .join(Student, ClassroomWorksheet.student_id == Student.id)
+            .join(Section, Student.section_id == Section.id)
+            .join(SchoolClass, Section.class_id == SchoolClass.id)
+            .filter(
+                and_(
+                    SchoolClass.school_id == current_user.school_id,
+                    ClassroomWorksheet.subject == classroom.subject,
+                )
+            )
         )).scalar() or 0
 
         accepted_count = sum(1 for s in students if s.status == "ACCEPTED")
@@ -682,7 +752,11 @@ async def assign_teachers_to_classroom(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid classroom UUID format.")
 
-    classroom = (await db.execute(select(Classroom).filter_by(id=classroom_uuid))).scalar_one_or_none()
+    classroom = (await db.execute(
+        select(Classroom)
+        .join(User, Classroom.created_by == User.id)
+        .filter(and_(Classroom.id == classroom_uuid, User.school_id == current_user.school_id))
+    )).scalar_one_or_none()
     if not classroom:
         raise HTTPException(status_code=404, detail="Classroom not found.")
 
@@ -717,7 +791,11 @@ async def assign_students_to_classroom(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid classroom UUID format.")
 
-    classroom = (await db.execute(select(Classroom).filter_by(id=classroom_uuid))).scalar_one_or_none()
+    classroom = (await db.execute(
+        select(Classroom)
+        .join(User, Classroom.created_by == User.id)
+        .filter(and_(Classroom.id == classroom_uuid, User.school_id == current_user.school_id))
+    )).scalar_one_or_none()
     if not classroom:
         raise HTTPException(status_code=404, detail="Classroom not found.")
 
@@ -751,6 +829,10 @@ async def list_school_assignments(
     worksheets = (await db.execute(
         select(ClassroomWorksheet)
         .options(selectinload(ClassroomWorksheet.student))
+        .join(Student, ClassroomWorksheet.student_id == Student.id)
+        .join(Section, Student.section_id == Section.id)
+        .join(SchoolClass, Section.class_id == SchoolClass.id)
+        .filter(SchoolClass.school_id == current_user.school_id)
         .order_by(ClassroomWorksheet.created_at.desc())
         .limit(200)
     )).scalars().all()
