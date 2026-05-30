@@ -7,14 +7,31 @@ All operations are tenant-isolated by the admin's school_id.
 import csv
 import io
 import logging
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
+from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
-from app.db.models import User, School, SchoolClass, Section, Student
+from app.db.models import (
+    User,
+    School,
+    SchoolClass,
+    Section,
+    Student,
+    Classroom,
+    ClassroomTeacher,
+    ClassroomStudent,
+    ClassroomWorksheet,
+    ExamCycle,
+    Task,
+    Submission,
+    GradeResult,
+    GradingRun,
+)
 from app.schemas.common import ApiResponse
 from app.schemas.operations import (
     BulkInviteRequest,
@@ -37,6 +54,289 @@ def _require_school(user: User) -> None:
         import uuid
         # Fallback to default OzymorLab Academic Academy ID to prevent 403 errors in dev/testing
         user.school_id = uuid.UUID("150196c5-deb3-4580-9db7-80a75de6c382")
+
+
+async def _get_or_create_section(
+    db: AsyncSession,
+    school_id,
+    class_name: str,
+    section_name: str,
+) -> Section:
+    """Resolve a school class/section pair, creating it when an admin edits a roster row."""
+    class_clean = class_name.strip()
+    section_clean = section_name.strip()
+    if not class_clean or not section_clean:
+        raise HTTPException(status_code=400, detail="class_name and section_name are required.")
+
+    result = await db.execute(
+        select(SchoolClass).filter_by(school_id=school_id, name=class_clean)
+    )
+    school_class = result.scalar_one_or_none()
+    if not school_class:
+        school_class = SchoolClass(school_id=school_id, name=class_clean)
+        db.add(school_class)
+        await db.flush()
+
+    result = await db.execute(
+        select(Section).filter_by(class_id=school_class.id, name=section_clean)
+    )
+    section = result.scalar_one_or_none()
+    if not section:
+        section = Section(class_id=school_class.id, name=section_clean)
+        db.add(section)
+        await db.flush()
+
+    return section
+
+
+async def _get_school_student(db: AsyncSession, school_id, student_id: str) -> Student:
+    try:
+        student_uuid = uuid.UUID(student_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid student UUID format.")
+
+    result = await db.execute(
+        select(Student)
+        .join(Section, Student.section_id == Section.id)
+        .join(SchoolClass, Section.class_id == SchoolClass.id)
+        .filter(and_(Student.id == student_uuid, SchoolClass.school_id == school_id))
+    )
+    student = result.scalar_one_or_none()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found in this school.")
+    return student
+
+
+@router.get("/overview", dependencies=[Depends(require_role(["admin", "principal"]))])
+async def get_school_overview(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Comprehensive school operations and analytics snapshot for the admin portal."""
+    _require_school(current_user)
+    school_id = current_user.school_id
+
+    school = (await db.execute(select(School).filter_by(id=school_id))).scalar_one_or_none()
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found.")
+
+    total_students = (await db.execute(
+        select(func.count(Student.id))
+        .join(Section, Student.section_id == Section.id)
+        .join(SchoolClass, Section.class_id == SchoolClass.id)
+        .filter(SchoolClass.school_id == school_id)
+    )).scalar() or 0
+
+    total_teachers = (await db.execute(
+        select(func.count(User.id)).filter(
+            and_(
+                User.school_id == school_id,
+                User.is_active.is_(True),
+                User.role.in_(["teacher", "hod", "admin", "principal"]),
+            )
+        )
+    )).scalar() or 0
+
+    total_classrooms = (await db.execute(select(func.count(Classroom.id)))).scalar() or 0
+    total_exams = (await db.execute(select(func.count(ExamCycle.id)).filter_by(school_id=school_id))).scalar() or 0
+
+    total_assignments = (await db.execute(select(func.count(Task.id)))).scalar() or 0
+    active_assignments = (await db.execute(
+        select(func.count(ClassroomWorksheet.id)).filter(ClassroomWorksheet.status.in_(["PENDING", "GRADED"]))
+    )).scalar() or 0
+
+    submission_status_rows = (await db.execute(
+        select(Submission.status, func.count(Submission.id)).group_by(Submission.status)
+    )).all()
+    pipeline = {
+        "pending": 0,
+        "parsing": 0,
+        "grading": 0,
+        "graded": 0,
+        "failed": 0,
+    }
+    for status, count in submission_status_rows:
+        key = (status or "").lower()
+        if key in ["pending", "identity_extracted", "parsed"]:
+            pipeline["pending"] += count
+        elif key == "parsing":
+            pipeline["parsing"] += count
+        elif key == "grading":
+            pipeline["grading"] += count
+        elif key in ["graded", "published"]:
+            pipeline["graded"] += count
+        elif key == "failed":
+            pipeline["failed"] += count
+
+    grade_rows = (await db.execute(select(GradeResult.grade, GradeResult.max_grade))).all()
+    grade_distribution = {"excellent": 0, "good": 0, "average": 0, "below": 0}
+    for grade, max_grade in grade_rows:
+        pct = (grade / max_grade * 100) if max_grade else 0
+        if pct >= 85:
+            grade_distribution["excellent"] += 1
+        elif pct >= 70:
+            grade_distribution["good"] += 1
+        elif pct >= 50:
+            grade_distribution["average"] += 1
+        else:
+            grade_distribution["below"] += 1
+
+    monthly_rows = (await db.execute(
+        select(
+            func.to_char(GradeResult.graded_at, "Mon YYYY"),
+            func.avg((GradeResult.grade * 100.0) / func.nullif(GradeResult.max_grade, 0)),
+        )
+        .group_by(func.to_char(GradeResult.graded_at, "Mon YYYY"), func.date_trunc("month", GradeResult.graded_at))
+        .order_by(func.date_trunc("month", GradeResult.graded_at))
+        .limit(12)
+    )).all()
+    performance_trends = [
+        {"month": month, "average": round(float(avg or 0), 1)}
+        for month, avg in monthly_rows
+    ]
+
+    recent_runs = (await db.execute(
+        select(GradingRun).order_by(GradingRun.created_at.desc()).limit(8)
+    )).scalars().all()
+
+    return ApiResponse(data={
+        "school_id": str(school_id),
+        "school_name": school.name,
+        "stats": {
+            "total_students": total_students,
+            "total_teachers": total_teachers,
+            "total_classrooms": total_classrooms,
+            "total_exams": total_exams,
+            "total_assignments": total_assignments,
+            "active_assignments": active_assignments,
+            "total_evaluations": sum(pipeline.values()),
+        },
+        "performance_trends": performance_trends,
+        "grade_distribution": grade_distribution,
+        "evaluation_pipeline": pipeline,
+        "recent_evaluation_runs": [
+            {
+                "id": str(run.id),
+                "status": run.status,
+                "model": run.model,
+                "total_submissions": run.total_submissions,
+                "graded_count": run.graded_count,
+                "failed_count": run.failed_count,
+                "created_at": run.created_at.isoformat(),
+            }
+            for run in recent_runs
+        ],
+    })
+
+
+@router.get("/teachers", dependencies=[Depends(require_role(["admin", "principal"]))])
+async def list_school_teachers(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List all active school staff that can teach or administer classes."""
+    _require_school(current_user)
+
+    result = await db.execute(
+        select(User)
+        .filter(
+            and_(
+                User.school_id == current_user.school_id,
+                User.role.in_(["teacher", "hod", "admin", "principal"]),
+            )
+        )
+        .order_by(User.full_name)
+    )
+    teachers = result.scalars().all()
+
+    items = []
+    for teacher in teachers:
+        assignment_rows = (await db.execute(
+            select(Classroom)
+            .join(ClassroomTeacher, ClassroomTeacher.classroom_id == Classroom.id)
+            .filter(ClassroomTeacher.teacher_id == teacher.id)
+            .order_by(Classroom.subject)
+        )).scalars().all()
+        items.append({
+            "id": str(teacher.id),
+            "name": teacher.full_name,
+            "email": teacher.email,
+            "role": teacher.role,
+            "status": "Active" if teacher.is_active else "Inactive",
+            "created_at": teacher.created_at.isoformat(),
+            "assigned_classrooms": [
+                {
+                    "id": str(c.id),
+                    "subject": c.subject,
+                    "class_name": c.class_name,
+                    "session": c.session,
+                }
+                for c in assignment_rows
+            ],
+        })
+
+    return ApiResponse(data=items)
+
+
+@router.put("/teachers/{user_id}", dependencies=[Depends(require_role(["admin", "principal"]))])
+async def update_school_teacher(
+    user_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update a teacher/staff display name or role."""
+    _require_school(current_user)
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user UUID format.")
+
+    teacher = (await db.execute(
+        select(User).filter_by(id=user_uuid, school_id=current_user.school_id)
+    )).scalar_one_or_none()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found in this school.")
+
+    role = payload.get("role")
+    if role is not None:
+        if role not in ["teacher", "hod", "admin", "principal"]:
+            raise HTTPException(status_code=400, detail="Invalid role.")
+        teacher.role = role
+
+    full_name = (payload.get("full_name") or payload.get("name") or "").strip()
+    if full_name:
+        teacher.full_name = full_name
+
+    return ApiResponse(data={"message": "Teacher updated successfully."})
+
+
+@router.delete("/teachers/{user_id}", dependencies=[Depends(require_role(["admin", "principal"]))])
+async def remove_school_teacher(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Deactivate a teacher and remove their classroom assignments."""
+    _require_school(current_user)
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user UUID format.")
+
+    if user_uuid == current_user.id:
+        raise HTTPException(status_code=400, detail="Admins cannot remove their own account.")
+
+    teacher = (await db.execute(
+        select(User).filter_by(id=user_uuid, school_id=current_user.school_id)
+    )).scalar_one_or_none()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found in this school.")
+
+    await db.execute(ClassroomTeacher.__table__.delete().where(ClassroomTeacher.teacher_id == user_uuid))
+    teacher.is_active = False
+
+    return ApiResponse(data={"message": "Teacher removed from school."})
 
 
 @router.post("/users/bulk", dependencies=[Depends(require_role(["admin"]))])
@@ -276,6 +576,224 @@ async def list_students(
         })
 
     return ApiResponse(data=items)
+
+
+@router.put("/students/{student_id}", dependencies=[Depends(require_role(["admin", "principal"]))])
+async def update_student(
+    student_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Edit an individual student roster record."""
+    _require_school(current_user)
+    student = await _get_school_student(db, current_user.school_id, student_id)
+
+    name = (payload.get("name") or "").strip()
+    roll_number = (payload.get("roll_number") or "").strip()
+    class_name = (payload.get("class_name") or "").strip()
+    section_name = (payload.get("section_name") or "").strip()
+
+    if name:
+        student.name = name
+    if roll_number:
+        student.roll_number = roll_number
+    if class_name or section_name:
+        current_section = student.section
+        current_class = current_section.school_class if current_section else None
+        section = await _get_or_create_section(
+            db,
+            current_user.school_id,
+            class_name or (current_class.name if current_class else ""),
+            section_name or (current_section.name if current_section else ""),
+        )
+        student.section_id = section.id
+
+    return ApiResponse(data={"message": "Student updated successfully."})
+
+
+@router.delete("/students/{student_id}", dependencies=[Depends(require_role(["admin", "principal"]))])
+async def remove_student(
+    student_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Remove a student from the school roster."""
+    _require_school(current_user)
+    student = await _get_school_student(db, current_user.school_id, student_id)
+    await db.delete(student)
+    return ApiResponse(data={"message": "Student removed successfully."})
+
+
+@router.get("/classrooms", dependencies=[Depends(require_role(["admin", "principal"]))])
+async def list_school_classrooms(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Monitor all classrooms visible to the school admin."""
+    _require_school(current_user)
+
+    result = await db.execute(select(Classroom).order_by(Classroom.created_at.desc()))
+    classrooms = result.scalars().all()
+    items = []
+    for classroom in classrooms:
+        teachers = (await db.execute(
+            select(User)
+            .join(ClassroomTeacher, ClassroomTeacher.teacher_id == User.id)
+            .filter(ClassroomTeacher.classroom_id == classroom.id)
+            .order_by(User.full_name)
+        )).scalars().all()
+        students = (await db.execute(
+            select(ClassroomStudent).filter_by(classroom_id=classroom.id)
+        )).scalars().all()
+        worksheets_count = (await db.execute(
+            select(func.count(ClassroomWorksheet.id)).filter_by(subject=classroom.subject)
+        )).scalar() or 0
+
+        accepted_count = sum(1 for s in students if s.status == "ACCEPTED")
+        items.append({
+            "id": str(classroom.id),
+            "subject": classroom.subject,
+            "class_name": classroom.class_name,
+            "session": classroom.session,
+            "created_at": classroom.created_at.isoformat(),
+            "activity_status": "Active" if worksheets_count or accepted_count else "Setup",
+            "teacher_count": len(teachers),
+            "student_count": len(students),
+            "accepted_students": accepted_count,
+            "assignment_count": worksheets_count,
+            "teachers": [{"id": str(t.id), "name": t.full_name, "email": t.email} for t in teachers],
+        })
+
+    return ApiResponse(data=items)
+
+
+@router.post("/classrooms/{classroom_id}/teachers", dependencies=[Depends(require_role(["admin", "principal"]))])
+async def assign_teachers_to_classroom(
+    classroom_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Assign one or more teachers to a classroom from the school admin portal."""
+    _require_school(current_user)
+    try:
+        classroom_uuid = uuid.UUID(classroom_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid classroom UUID format.")
+
+    classroom = (await db.execute(select(Classroom).filter_by(id=classroom_uuid))).scalar_one_or_none()
+    if not classroom:
+        raise HTTPException(status_code=404, detail="Classroom not found.")
+
+    teacher_ids = payload.get("teacher_ids") or []
+    await db.execute(ClassroomTeacher.__table__.delete().where(ClassroomTeacher.classroom_id == classroom_uuid))
+
+    for teacher_id in teacher_ids:
+        try:
+            teacher_uuid = uuid.UUID(teacher_id)
+        except ValueError:
+            continue
+        teacher = (await db.execute(
+            select(User).filter_by(id=teacher_uuid, school_id=current_user.school_id, is_active=True)
+        )).scalar_one_or_none()
+        if teacher:
+            db.add(ClassroomTeacher(classroom_id=classroom_uuid, teacher_id=teacher_uuid))
+
+    return ApiResponse(data={"message": "Classroom teachers updated successfully."})
+
+
+@router.post("/classrooms/{classroom_id}/students", dependencies=[Depends(require_role(["admin", "principal"]))])
+async def assign_students_to_classroom(
+    classroom_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Invite roster students to a classroom using student IDs."""
+    _require_school(current_user)
+    try:
+        classroom_uuid = uuid.UUID(classroom_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid classroom UUID format.")
+
+    classroom = (await db.execute(select(Classroom).filter_by(id=classroom_uuid))).scalar_one_or_none()
+    if not classroom:
+        raise HTTPException(status_code=404, detail="Classroom not found.")
+
+    student_ids = payload.get("student_ids") or []
+    invited = 0
+    for student_id in student_ids:
+        student = await _get_school_student(db, current_user.school_id, student_id)
+        synthetic_email = f"{student.roll_number.lower()}@student.ozymorlab.local"
+        existing = (await db.execute(
+            select(ClassroomStudent).filter_by(classroom_id=classroom_uuid, student_email=synthetic_email)
+        )).scalar_one_or_none()
+        if not existing:
+            db.add(ClassroomStudent(
+                classroom_id=classroom_uuid,
+                student_email=synthetic_email,
+                status="ACCEPTED",
+            ))
+            invited += 1
+
+    return ApiResponse(data={"message": f"{invited} student(s) assigned to classroom."})
+
+
+@router.get("/assignments", dependencies=[Depends(require_role(["admin", "principal"]))])
+async def list_school_assignments(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Monitor exams and assignments across school classrooms."""
+    _require_school(current_user)
+
+    worksheets = (await db.execute(
+        select(ClassroomWorksheet)
+        .options(selectinload(ClassroomWorksheet.student))
+        .order_by(ClassroomWorksheet.created_at.desc())
+        .limit(200)
+    )).scalars().all()
+
+    grouped = {}
+    for worksheet in worksheets:
+        key = (worksheet.title, worksheet.subject, worksheet.due_date)
+        item = grouped.setdefault(key, {
+            "id": str(worksheet.id),
+            "title": worksheet.title,
+            "subject": worksheet.subject,
+            "teacher": worksheet.teacher,
+            "due_date": worksheet.due_date,
+            "total_submissions": 0,
+            "graded_count": 0,
+            "pending_count": 0,
+            "published_count": 0,
+            "status": "Pending",
+            "students": [],
+        })
+        item["total_submissions"] += 1
+        if worksheet.status in ["GRADED", "PUBLISHED"]:
+            item["graded_count"] += 1
+        if worksheet.status == "PENDING":
+            item["pending_count"] += 1
+        if worksheet.status == "PUBLISHED":
+            item["published_count"] += 1
+        item["students"].append({
+            "worksheet_id": str(worksheet.id),
+            "student_name": worksheet.student.name if worksheet.student else "Unknown",
+            "status": worksheet.status,
+            "grade": worksheet.grade,
+        })
+
+    for item in grouped.values():
+        if item["published_count"] == item["total_submissions"] and item["total_submissions"]:
+            item["status"] = "Published"
+        elif item["graded_count"]:
+            item["status"] = "Grading complete"
+        elif item["pending_count"]:
+            item["status"] = "Collecting submissions"
+
+    return ApiResponse(data=list(grouped.values()))
 
 
 @router.get("/classes", dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal"]))])
