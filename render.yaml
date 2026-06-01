@@ -22,9 +22,9 @@ services:
       - key: REDIS_URL
         sync: false
       - key: CELERY_BROKER_URL
-        sync: false # Set to same value as REDIS_URL in Render dashboard (Upstash rediss:// URL)
+        sync: false # Set to same rediss:// Upstash URL as REDIS_URL
       - key: CELERY_RESULT_BACKEND
-        sync: false # Set to same value as REDIS_URL in Render dashboard
+        sync: false # Set to same rediss:// Upstash URL as REDIS_URL
       - key: AWS_ACCESS_KEY_ID
         sync: false
       - key: AWS_SECRET_ACCESS_KEY
@@ -33,6 +33,38 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false # Google AI Studio API Key
+
+  # ── Celery Worker Service (PDF parsing + AI grading background jobs) ──
+  - type: worker
+    name: edexia-celery-worker
+    runtime: docker
+    rootDirectory: Edexia-Backend/backend
+    dockerCommand: celery -A app.worker worker --loglevel=info --queues=default,parsing,grading --concurrency=2
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_STORAGE_BUCKET_NAME
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
 
   # ── Diagram-marker Gateway Web Service ──
   - type: web
