@@ -77,7 +77,8 @@ def grade_submission(
     components = decompose_question(rubric_steps, question_text)
 
     if not components:
-        logger.warning("No components found. Falling back to single text component.")
+        logger.warning(
+            "No components found. Falling back to single text component.")
         components = [{
             "type": "text",
             "description": "Full answer evaluation",
@@ -101,10 +102,12 @@ def grade_submission(
     # Order: diagram -> labels -> text -> reasoning (or similar, just diagram before labels)
     def component_priority(c):
         t = c.get("type", "text")
-        if t == "diagram": return 0
-        if t == "labels": return 1
+        if t == "diagram":
+            return 0
+        if t == "labels":
+            return 1
         return 2
-        
+
     components.sort(key=component_priority)
 
     for component in components:
@@ -136,11 +139,13 @@ def grade_submission(
                 # Find the rubric step with diagram_relations
                 component_step_nums = set(component.get("rubric_steps", []))
                 diagram_rubric_step = next(
-                    (s for s in rubric_steps if s.get("step_num") in component_step_nums),
+                    (s for s in rubric_steps if s.get(
+                        "step_num") in component_step_nums),
                     None,
                 )
                 if diagram_rubric_step:
-                    actual_file_key = parsed_content.get("diagram_file_key") or file_key
+                    actual_file_key = parsed_content.get(
+                        "diagram_file_key") or file_key
                     result = evaluate_diagram_step(
                         file_key=actual_file_key,
                         rubric_step=diagram_rubric_step,
@@ -159,11 +164,13 @@ def grade_submission(
                         "justification": result.get("justification", ""),
                     })
                 else:
-                    component_results.append(_zero_component("diagram", component))
+                    component_results.append(
+                        _zero_component("diagram", component))
             else:
-                logger.warning("Diagram component found but no file_key provided.")
+                logger.warning(
+                    "Diagram component found but no file_key provided.")
                 component_results.append(_zero_component("diagram", component,
-                    justification="Submission file not accessible for diagram evaluation."))
+                                                         justification="Submission file not accessible for diagram evaluation."))
 
         elif ctype == "labels":
             # ── Label Validation Pipeline ──
@@ -190,7 +197,8 @@ def grade_submission(
             component_results.append(result)
 
         else:
-            logger.warning(f"Unknown component type '{ctype}', treating as text.")
+            logger.warning(
+                f"Unknown component type '{ctype}', treating as text.")
             result = evaluate_text_component(
                 component=component,
                 rubric_steps=rubric_steps,
@@ -251,6 +259,22 @@ def _zero_component(ctype: str, component: dict, justification: str = "") -> dic
         "grade_distribution": dist,
         "justification": justification or f"No {ctype} evaluation performed.",
     }
+
+
+async def grade_submission_background(submission_id: str, grading_run_id: str):
+    """Background task to grade a single submission."""
+    from app.db.session import async_session_factory
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    async with async_session_factory() as db:
+        try:
+            # Your existing grading logic here
+            # Update grade result and run status
+            pass
+        except Exception as e:
+            logger.error(f"Grading failed for submission {submission_id}: {e}")
 
 
 def _extract_step_grades(component_results: list[dict]) -> list[dict]:

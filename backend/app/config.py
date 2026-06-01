@@ -1,6 +1,7 @@
 """
 AIOS Configuration — Pydantic Settings loaded from environment variables.
 """
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from pydantic_settings import BaseSettings
 
 
@@ -20,6 +21,9 @@ class Settings(BaseSettings):
     # ── Redis ──
     REDIS_URL: str = "redis://redis:6379/0"
 
+    # Add this setting
+    AUTO_GRADE_ON_UPLOAD = os.getenv(
+        "AUTO_GRADE_ON_UPLOAD", "False").lower() == "true"
     # ── AWS S3 (Storage) ──
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
@@ -73,11 +77,12 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         origins = [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
-        
+
         # Security: Remove localhost/loopback origins in production environment
         if self.APP_ENV.lower() == "production":
-            origins = [o for o in origins if "localhost" not in o and "127.0.0.1" not in o]
-            
+            origins = [
+                o for o in origins if "localhost" not in o and "127.0.0.1" not in o]
+
         return origins
 
     @property
@@ -90,7 +95,8 @@ class Settings(BaseSettings):
         """Returns CELERY_RESULT_BACKEND, falling back to REDIS_URL if empty."""
         return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
-    model_config = {"env_file": (".env", "../.env"), "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = {"env_file": (".env", "../.env"),
+                    "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()
@@ -98,7 +104,7 @@ settings = Settings()
 # ── PgBouncer Connection String Sanitization ──
 # Strip pgbouncer query parameters from the database connection strings.
 # This prevents asyncpg and psycopg2 from throwing TypeError: connect() got an unexpected keyword argument 'pgbouncer'
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
 
 def _strip_pgbouncer(url_str: str) -> str:
     if not url_str or "pgbouncer" not in url_str:
@@ -113,6 +119,6 @@ def _strip_pgbouncer(url_str: str) -> str:
     except Exception:
         return url_str
 
+
 settings.DATABASE_URL = _strip_pgbouncer(settings.DATABASE_URL)
 settings.DATABASE_URL_SYNC = _strip_pgbouncer(settings.DATABASE_URL_SYNC)
-
