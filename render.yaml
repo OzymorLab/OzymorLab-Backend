@@ -1,0 +1,42 @@
+services:
+  # ── FastAPI Backend Web Service ──
+  - type: web
+    name: edexia-backend
+    runtime: docker
+    rootDirectory: Edexia-Backend/backend
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false # Connects to Supabase PgBouncer Pooler (port 6543)
+      - key: SUPABASE_URL
+        sync: false # Supabase Project API URL
+      - key: SUPABASE_ANON_KEY
+        sync: false # Publishable client key
+      - key: SUPABASE_JWT_SECRET
+        sync: false # Fallback symmetric key for jwt verification
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: REDIS_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_STORAGE_BUCKET_NAME
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false # Google AI Studio API Key
+
+  # ── Diagram-marker Gateway Web Service ──
+  - type: web
+    name: diagram-marker
+    runtime: docker
+    rootDirectory: Diagram-marker
+    buildCommand: ""
+    startCommand: uvicorn services.gateway.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: REDIS_URL
+        sync: false
+      - key: KAFKA_BOOTSTRAP_SERVERS
+        sync: false
