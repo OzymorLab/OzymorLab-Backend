@@ -18,7 +18,7 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false # Supabase service role key to bypass RLS in backend
       - key: CORS_ORIGINS
-        value: "*"
+        value: "https://ozymorlab.vercel.app,https://edeziav2.vercel.app"
       - key: REDIS_URL
         sync: false
       - key: AWS_ACCESS_KEY_ID

@@ -5,15 +5,34 @@ Handles PDF parsing and LLM grading as background jobs.
 from celery import Celery
 from app.config import settings
 
+from urllib.parse import urlparse, urlunparse
+
+# Upstash Redis only supports database 0. Dynamically rewrite database index from /1 to /0 to avoid Kombu OperationalError.
+def sanitize_redis_url(url_str: str) -> str:
+    if not url_str:
+        return url_str
+    if "upstash.io" in url_str:
+        try:
+            parsed = urlparse(url_str)
+            if parsed.path and parsed.path != "/0":
+                parsed = parsed._replace(path="/0")
+            return urlunparse(parsed)
+        except Exception:
+            pass
+    return url_str
+
+broker_url = sanitize_redis_url(settings.CELERY_BROKER_URL)
+backend_url = sanitize_redis_url(settings.CELERY_RESULT_BACKEND)
+
 celery_app = Celery(
     "aios",
-    broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_RESULT_BACKEND,
+    broker=broker_url,
+    backend=backend_url,
 )
 
 # Resilient SSL certificate configuration for secure Upstash Redis (rediss://)
-is_secure_broker = settings.CELERY_BROKER_URL.startswith("rediss://")
-is_secure_backend = settings.CELERY_RESULT_BACKEND.startswith("rediss://")
+is_secure_broker = broker_url.startswith("rediss://")
+is_secure_backend = backend_url.startswith("rediss://")
 
 celery_app.conf.update(
     broker_use_ssl={"ssl_cert_reqs": 0} if is_secure_broker else False,
