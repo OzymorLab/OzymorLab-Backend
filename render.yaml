@@ -21,6 +21,10 @@ services:
         value: "https://ozymorlab.vercel.app,https://edeziav2.vercel.app"
       - key: REDIS_URL
         sync: false
+      - key: CELERY_BROKER_URL
+        sync: false # Set to same value as REDIS_URL in Render dashboard (Upstash rediss:// URL)
+      - key: CELERY_RESULT_BACKEND
+        sync: false # Set to same value as REDIS_URL in Render dashboard
       - key: AWS_ACCESS_KEY_ID
         sync: false
       - key: AWS_SECRET_ACCESS_KEY

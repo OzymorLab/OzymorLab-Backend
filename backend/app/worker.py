@@ -21,8 +21,8 @@ def sanitize_redis_url(url_str: str) -> str:
             pass
     return url_str
 
-broker_url = sanitize_redis_url(settings.CELERY_BROKER_URL)
-backend_url = sanitize_redis_url(settings.CELERY_RESULT_BACKEND)
+broker_url = sanitize_redis_url(settings.celery_broker)
+backend_url = sanitize_redis_url(settings.celery_backend)
 
 celery_app = Celery(
     "aios",

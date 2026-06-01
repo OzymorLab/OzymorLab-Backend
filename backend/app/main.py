@@ -90,6 +90,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Global exception handler — ensures CORS headers on 500 errors ──
+import traceback
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all: logs the exception and returns a 500 WITH CORS headers.
+    Without this, unhandled exceptions (e.g. Celery broker down) can bypass
+    CORSMiddleware in ASGI edge cases, causing browsers to see a CORS error
+    instead of the real server error.
+    """
+    logger.error(
+        f"Unhandled exception on {request.method} {request.url.path}:\n"
+        + traceback.format_exc()
+    )
+    origin = request.headers.get("origin", "")
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error. Check server logs for details."},
+    )
+    # Manually attach CORS headers so the browser can read the error body
+    allowed_origins = settings.cors_origins_list
+    if origin and ("*" in allowed_origins or origin in allowed_origins):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    elif "*" in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
 # Prometheus metrics
 Instrumentator().instrument(app).expose(app)
 

@@ -47,8 +47,10 @@ class Settings(BaseSettings):
     LABEL_FUZZY_THRESHOLD: int = 80  # 0-100, minimum similarity score for label match
 
     # ── Celery ──
-    CELERY_BROKER_URL: str = "redis://redis:6379/0"
-    CELERY_RESULT_BACKEND: str = "redis://redis:6379/1"
+    # If CELERY_BROKER_URL is not explicitly set, fall back to REDIS_URL
+    # This ensures Celery works on Render where only REDIS_URL is configured
+    CELERY_BROKER_URL: str = ""
+    CELERY_RESULT_BACKEND: str = ""
 
     # ── JWT Auth ──
     JWT_SECRET_KEY: str = "edexia-secret-change-me-in-production"
@@ -77,6 +79,16 @@ class Settings(BaseSettings):
             origins = [o for o in origins if "localhost" not in o and "127.0.0.1" not in o]
             
         return origins
+
+    @property
+    def celery_broker(self) -> str:
+        """Returns CELERY_BROKER_URL, falling back to REDIS_URL if empty."""
+        return self.CELERY_BROKER_URL or self.REDIS_URL
+
+    @property
+    def celery_backend(self) -> str:
+        """Returns CELERY_RESULT_BACKEND, falling back to REDIS_URL if empty."""
+        return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
     model_config = {"env_file": (".env", "../.env"), "env_file_encoding": "utf-8", "extra": "ignore"}
 

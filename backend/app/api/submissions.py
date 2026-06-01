@@ -116,8 +116,15 @@ async def create_submission(
     await db.flush()
 
     # Enqueue Celery Orchestrator task (auto-grading pipeline)
-    from app.tasks.orchestrator import process_submission
-    process_submission.delay(str(submission.id))
+    try:
+        from app.tasks.orchestrator import process_submission
+        process_submission.delay(str(submission.id))
+    except Exception as celery_err:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"Celery enqueue failed for submission {submission.id}: {celery_err}. "
+            "Submission saved as PENDING — it can be retried manually."
+        )
 
     return ApiResponse(data=SubmissionUploadResponse(
         submission_id=str(submission.id),
@@ -489,8 +496,15 @@ async def bulk_upload_submissions(
         await db.flush()
 
         # Queue Celery parse task
-        from app.tasks.parse_submission import parse
-        parse.delay(str(submission.id))
+        try:
+            from app.tasks.parse_submission import parse
+            parse.delay(str(submission.id))
+        except Exception as celery_err:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Celery enqueue failed for submission {submission.id}: {celery_err}. "
+                "Saved as PENDING — grading can be triggered via /submissions/bulk-grade."
+            )
 
         submitted.append({
             "submission_id": str(submission.id),
