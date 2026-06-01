@@ -116,6 +116,7 @@ def decode_supabase_token(token: str, jwks: dict = None) -> dict:
     """
     Decodes and validates a Supabase JWT token using JWKS (public key) or fallback secret.
     """
+    jwks_exception = None
     try:
         # Get unverified header to check the 'kid' and 'alg'
         unverified_header = jwt.get_unverified_header(token)
@@ -136,18 +137,24 @@ def decode_supabase_token(token: str, jwks: dict = None) -> dict:
                     )
                 except Exception as e:
                     logger.debug(f"JWKS public key decoding failed, checking fallback secret: {e}")
-                    if not settings.SUPABASE_JWT_SECRET:
-                        raise e
+                    jwks_exception = e
         
-        # Fallback to symmetric key verification if secret is configured
-        if settings.SUPABASE_JWT_SECRET:
-            return jwt.decode(
-                token,
-                settings.SUPABASE_JWT_SECRET,
-                algorithms=[alg, "HS256", "RS256"],
-                audience="authenticated"
-            )
+        # Fallback to symmetric key verification ONLY if the token is signed symmetrically (HS256)
+        if alg.startswith("HS") and settings.SUPABASE_JWT_SECRET:
+            try:
+                return jwt.decode(
+                    token,
+                    settings.SUPABASE_JWT_SECRET,
+                    algorithms=["HS256", "HS384", "HS512"],
+                    audience="authenticated"
+                )
+            except Exception as e:
+                raise e
         
+        # If we had a public key decoding exception (e.g., token expired, signature check failed), raise it
+        if jwks_exception:
+            raise jwks_exception
+            
         # If neither worked, raise JWTError
         raise JWTError("No valid keys found for JWT verification.")
     except Exception as e:
