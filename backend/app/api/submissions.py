@@ -2,7 +2,7 @@
 Submissions API — file upload, bulk upload, status tracking, grade retrieval.
 """
 from app.utils.idempotency import idempotent
-from fastapi import Request
+from fastapi import Request, BackgroundTasks
 import json
 import re
 from typing import List, Optional
@@ -30,6 +30,9 @@ from app.services.auth_service import (
 )
 from app.config import settings
 
+# Set up logging
+logger = logging.getLogger(__name__)
+
 router = APIRouter(
     prefix="/submissions",
     tags=["Submissions"],
@@ -47,9 +50,79 @@ def is_valid_uuid(val: str) -> bool:
         return False
 
 
+async def process_submission_background(submission_id: str):
+    """
+    Background task to process a submission without Celery.
+    Handles: parsing, OCR, content extraction, and auto-grading if enabled.
+    """
+    from app.db.session import async_session_factory
+    from app.services.parsing import parse_submission_content
+    from app.services.grading import grade_submission
+
+    logger.info(
+        f"Starting background processing for submission {submission_id}")
+
+    # Create a new database session for background task
+    async with async_session_factory() as db:
+        try:
+            # Get submission
+            sub_uuid = uuid.UUID(submission_id)
+            submission = await db.get(Submission, sub_uuid)
+
+            if not submission:
+                logger.error(f"Submission {submission_id} not found")
+                return
+
+            # Update status to PROCESSING
+            submission.status = "PARSING"
+            await db.commit()
+            logger.info(
+                f"Submission {submission_id} status updated to PARSING")
+
+            # Parse the submission content (OCR, text extraction, etc.)
+            parsed_content = await parse_submission_content(submission.file_key)
+
+            # Update with parsed content
+            submission.status = "PARSED"
+            submission.parsed_content = parsed_content.dict() if parsed_content else None
+            submission.raw_text = parsed_content.raw_text if parsed_content else None
+            await db.commit()
+            logger.info(f"Submission {submission_id} successfully parsed")
+
+            # Auto-grade if enabled in settings
+            if hasattr(settings, 'AUTO_GRADE_ON_UPLOAD') and settings.AUTO_GRADE_ON_UPLOAD:
+                submission.status = "GRADING"
+                await db.commit()
+                logger.info(f"Auto-grading submission {submission_id}")
+
+                grade_result = await grade_submission(submission.id)
+
+                submission.status = "GRADED"
+                await db.commit()
+                logger.info(f"Submission {submission_id} successfully graded")
+            else:
+                logger.info(
+                    f"Submission {submission_id} ready for manual grading")
+
+        except Exception as e:
+            logger.error(
+                f"Failed to process submission {submission_id}: {str(e)}", exc_info=True)
+            # Update submission status to FAILED
+            try:
+                sub_uuid = uuid.UUID(submission_id)
+                submission = await db.get(Submission, sub_uuid)
+                if submission:
+                    submission.status = "FAILED"
+                    submission.error_message = str(e)
+                    await db.commit()
+            except Exception as db_error:
+                logger.error(f"Failed to update submission status: {db_error}")
+
+
 @router.post("")
 async def create_submission(
     request: Request,
+    background_tasks: BackgroundTasks,
     task_id: str = Form(...),
     student_id: Optional[str] = Form(None),
     file: UploadFile = File(...),
@@ -119,22 +192,19 @@ async def create_submission(
     )
     db.add(submission)
     await db.flush()
+    await db.refresh(submission)
 
-    # Enqueue Celery Orchestrator task (auto-grading pipeline)
-    try:
-        from app.tasks.orchestrator import process_submission
-        process_submission.delay(str(submission.id))
-    except Exception as celery_err:
-        import logging
-        logging.getLogger(__name__).warning(
-            f"Celery enqueue failed for submission {submission.id}: {celery_err}. "
-            "Submission saved as PENDING — it can be retried manually."
-        )
+    # Add background task for processing
+    background_tasks.add_task(
+        process_submission_background, str(submission.id))
+
+    logger.info(
+        f"Submission {submission.id} created and queued for background processing")
 
     return ApiResponse(data=SubmissionUploadResponse(
         submission_id=str(submission.id),
         status="PENDING",
-        message="Submission queued for auto-grading pipeline",
+        message="Submission queued for processing",
     ))
 
 
@@ -402,6 +472,7 @@ def _generate_student_id_from_filename(filename: str, index: int) -> str:
 @router.post("/bulk")
 async def bulk_upload_submissions(
     request: Request,
+    background_tasks: BackgroundTasks,
     task_id: str = Form(...),
     files: List[UploadFile] = File(...),
     student_ids: str = Form(""),
@@ -512,22 +583,11 @@ async def bulk_upload_submissions(
         )
         db.add(submission)
         await db.flush()
+        await db.refresh(submission)
 
-       # Queue Celery parse task
-        try:
-            from app.tasks.parse_submission import parse
-            parse.delay(str(submission.id))
-        except Exception as celery_err:
-            logger = logging.getLogger(__name__)
-            logger.error(
-                f"Celery enqueue failed for submission {submission.id}: {celery_err}"
-            )
-            # Mark submission as FAILED so it's visible, not silently stuck
-            submission.status = "FAILED"
-            submission.error_message = f"Parse queue failed: {str(celery_err)}"
-            failed.append(
-                {"file": filename, "error": f"Parse queue failed: {str(celery_err)}"})
-            continue  # Don't count this as submitted
+        # Add background task for processing (without Celery)
+        background_tasks.add_task(
+            process_submission_background, str(submission.id))
 
         submitted.append({
             "submission_id": str(submission.id),
@@ -535,13 +595,19 @@ async def bulk_upload_submissions(
             "file_name": filename,
         })
 
+        logger.info(
+            f"Bulk upload: submission {submission.id} created and queued")
+
+    # Commit all submissions at once
+    await db.commit()
+
     return ApiResponse(data={
         "submitted": len(submitted),
         "failed": len(failed),
         "total_files": len(files),
         "submissions": submitted,
         "errors": failed,
-        "message": f"{len(submitted)} answer sheets queued for parsing"
+        "message": f"{len(submitted)} answer sheets queued for processing"
         + (f", {len(failed)} failed" if failed else ""),
     })
 
@@ -557,6 +623,7 @@ class BulkGradeRequest(BaseModel):
 @idempotent()
 async def bulk_grade_submissions(
     payload: BulkGradeRequest,
+    background_tasks: BackgroundTasks,
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -619,8 +686,8 @@ async def bulk_grade_submissions(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"{pending} submission(s) are stuck in PENDING — Celery worker may be down or "
-                    f"the parse queue failed. Check worker logs and re-trigger parsing. "
+                    f"{pending} submission(s) are stuck in PENDING — background processing may be slow or failed. "
+                    f"Check logs and re-trigger parsing. "
                     f"Status breakdown: {status_counts}"
                 )
             )
@@ -639,6 +706,7 @@ async def bulk_grade_submissions(
             status_code=400,
             detail=f"No parsed submissions to grade. Current statuses: {status_counts}"
         )
+
     # Create grading run
     model = settings.GEMINI_MODEL
     run = GradingRun(
@@ -655,14 +723,19 @@ async def bulk_grade_submissions(
     )
     db.add(run)
     await db.flush()
+    await db.refresh(run)
 
-    # Enqueue grading tasks
-    from app.tasks.grade_submission import grade, finalize_run
-    from celery import chord
+    # Grade each submission in background tasks
+    from app.tasks.grade_submission import grade_submission_background
 
-    grade_tasks = [grade.s(str(sub.id), str(run.id)) for sub in submissions]
-    callback = finalize_run.si(str(run.id))
-    chord(grade_tasks)(callback)
+    for submission in submissions:
+        background_tasks.add_task(
+            grade_submission_background,
+            str(submission.id),
+            str(run.id)
+        )
+
+    await db.commit()
 
     return ApiResponse(data={
         "run_id": str(run.id),
@@ -676,6 +749,7 @@ async def bulk_grade_submissions(
 
 @router.post("/retry-pending")
 async def retry_pending_submissions(
+    background_tasks: BackgroundTasks,
     task_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(
@@ -704,13 +778,18 @@ async def retry_pending_submissions(
     requeued = []
     failed_requeue = []
 
-    from app.tasks.parse_submission import parse
     for sub in submissions:
         try:
+            # Reset submission status
             sub.status = "PENDING"
             sub.error_message = None
-            parse.delay(str(sub.id))
+            await db.flush()
+
+            # Add to background tasks
+            background_tasks.add_task(
+                process_submission_background, str(sub.id))
             requeued.append(str(sub.id))
+
         except Exception as e:
             failed_requeue.append(
                 {"submission_id": str(sub.id), "error": str(e)})
@@ -722,6 +801,6 @@ async def retry_pending_submissions(
         "failed_to_requeue": len(failed_requeue),
         "submission_ids": requeued,
         "errors": failed_requeue,
-        "message": f"{len(requeued)} submissions re-enqueued for parsing."
-        + (f" {len(failed_requeue)} failed — Celery worker may be down." if failed_requeue else ""),
+        "message": f"{len(requeued)} submissions re-enqueued for processing."
+        + (f" {len(failed_requeue)} failed — check error logs." if failed_requeue else ""),
     })
