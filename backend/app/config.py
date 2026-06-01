@@ -1,8 +1,10 @@
 """
 AIOS Configuration — Pydantic Settings loaded from environment variables.
 """
+import os  # Add this import
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from pydantic_settings import BaseSettings
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -18,12 +20,17 @@ class Settings(BaseSettings):
     DATABASE_URL_SYNC: str = "postgresql://aios:aios_secret@postgres:5432/aios"
     DIRECT_URL: str = ""
 
-    # ── Redis ──
+    # ── Redis (Optional - only needed if you keep Celery) ──
     REDIS_URL: str = "redis://redis:6379/0"
 
-    # Add this setting
-    AUTO_GRADE_ON_UPLOAD = os.getenv(
-        "AUTO_GRADE_ON_UPLOAD", "False").lower() == "true"
+    # ── Auto Grading Setting ──
+    AUTO_GRADE_ON_UPLOAD: bool = Field(
+        default=False,
+        description="Automatically grade submissions after successful parsing"
+    )
+    # Or keep the os.getenv version (but add os import at top):
+    # AUTO_GRADE_ON_UPLOAD = os.getenv("AUTO_GRADE_ON_UPLOAD", "False").lower() == "true"
+
     # ── AWS S3 (Storage) ──
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
@@ -50,9 +57,8 @@ class Settings(BaseSettings):
     # ── Label Validation ──
     LABEL_FUZZY_THRESHOLD: int = 80  # 0-100, minimum similarity score for label match
 
-    # ── Celery ──
-    # If CELERY_BROKER_URL is not explicitly set, fall back to REDIS_URL
-    # This ensures Celery works on Render where only REDIS_URL is configured
+    # ── Celery (Optional - can be removed if not using) ──
+    # If you're removing Celery completely, you can comment these out
     CELERY_BROKER_URL: str = ""
     CELERY_RESULT_BACKEND: str = ""
 
@@ -95,8 +101,11 @@ class Settings(BaseSettings):
         """Returns CELERY_RESULT_BACKEND, falling back to REDIS_URL if empty."""
         return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
-    model_config = {"env_file": (".env", "../.env"),
-                    "env_file_encoding": "utf-8", "extra": "ignore"}
+    class Config:
+        env_file = (".env", "../.env")
+        env_file_encoding = "utf-8"
+        extra = "ignore"
+        case_sensitive = True
 
 
 settings = Settings()
