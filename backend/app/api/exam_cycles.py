@@ -7,7 +7,7 @@ Access is always scoped by the current user's school_id for tenant isolation.
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 
 from app.db.session import get_db
 from app.db.models import ExamCycle, Task, User
@@ -28,24 +28,13 @@ router = APIRouter(
 )
 
 
-def _require_school(user: User) -> None:
-    """Ensure the user belongs to a school. Raises 403 if not."""
-    if not user.school_id:
-        raise HTTPException(
-            status_code=403,
-            detail="You must belong to a school to manage exam cycles.",
-        )
-
-
 @router.post("", dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))])
 async def create_exam_cycle(
     payload: ExamCycleCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Create a new exam cycle for the current user's school."""
-    _require_school(current_user)
-
+    """Create a new exam cycle for the current user (associated with school if assigned)."""
     # Validate date ordering
     if payload.start_date and payload.end_date and payload.end_date <= payload.start_date:
         raise HTTPException(status_code=400, detail="end_date must be after start_date.")
@@ -65,7 +54,7 @@ async def create_exam_cycle(
 
     return ApiResponse(data=ExamCycleResponse(
         id=str(cycle.id),
-        school_id=str(cycle.school_id),
+        school_id=str(cycle.school_id) if cycle.school_id else None,
         name=cycle.name,
         start_date=cycle.start_date.isoformat() if cycle.start_date else None,
         end_date=cycle.end_date.isoformat() if cycle.end_date else None,
@@ -84,16 +73,22 @@ async def list_exam_cycles(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List exam cycles scoped to the current user's school."""
-    _require_school(current_user)
-
-    query = (
-        select(ExamCycle)
-        .filter_by(school_id=current_user.school_id)
-        .order_by(ExamCycle.created_at.desc())
-    )
+    """List exam cycles scoped to the current user's school or created independently."""
+    if current_user.school_id:
+        query = (
+            select(ExamCycle)
+            .filter(or_(ExamCycle.school_id == current_user.school_id, ExamCycle.created_by == current_user.id))
+            .order_by(ExamCycle.created_at.desc())
+        )
+    else:
+        query = (
+            select(ExamCycle)
+            .filter(ExamCycle.created_by == current_user.id)
+            .order_by(ExamCycle.created_at.desc())
+        )
+        
     if status:
-        query = query.filter_by(status=status)
+        query = query.filter(ExamCycle.status == status)
     query = query.offset(skip).limit(limit)
 
     result = await db.execute(query)
@@ -109,7 +104,7 @@ async def list_exam_cycles(
 
         items.append(ExamCycleResponse(
             id=str(c.id),
-            school_id=str(c.school_id),
+            school_id=str(c.school_id) if c.school_id else None,
             name=c.name,
             start_date=c.start_date.isoformat() if c.start_date else None,
             end_date=c.end_date.isoformat() if c.end_date else None,
@@ -129,11 +124,20 @@ async def get_exam_cycle(
     current_user: User = Depends(get_current_user),
 ):
     """Get exam cycle details with linked tasks."""
-    _require_school(current_user)
-
-    result = await db.execute(
-        select(ExamCycle).filter_by(id=cycle_id, school_id=current_user.school_id)
-    )
+    if current_user.school_id:
+        result = await db.execute(
+            select(ExamCycle).filter(
+                ExamCycle.id == cycle_id,
+                or_(ExamCycle.school_id == current_user.school_id, ExamCycle.created_by == current_user.id)
+            )
+        )
+    else:
+        result = await db.execute(
+            select(ExamCycle).filter(
+                ExamCycle.id == cycle_id,
+                ExamCycle.created_by == current_user.id
+            )
+        )
     cycle = result.scalar_one_or_none()
     if not cycle:
         raise HTTPException(status_code=404, detail="Exam cycle not found.")
@@ -160,7 +164,7 @@ async def get_exam_cycle(
 
     return ApiResponse(data=ExamCycleDetailResponse(
         id=str(cycle.id),
-        school_id=str(cycle.school_id),
+        school_id=str(cycle.school_id) if cycle.school_id else None,
         name=cycle.name,
         start_date=cycle.start_date.isoformat() if cycle.start_date else None,
         end_date=cycle.end_date.isoformat() if cycle.end_date else None,
@@ -180,11 +184,20 @@ async def update_exam_cycle(
     current_user: User = Depends(get_current_user),
 ):
     """Update exam cycle metadata."""
-    _require_school(current_user)
-
-    result = await db.execute(
-        select(ExamCycle).filter_by(id=cycle_id, school_id=current_user.school_id)
-    )
+    if current_user.school_id:
+        result = await db.execute(
+            select(ExamCycle).filter(
+                ExamCycle.id == cycle_id,
+                or_(ExamCycle.school_id == current_user.school_id, ExamCycle.created_by == current_user.id)
+            )
+        )
+    else:
+        result = await db.execute(
+            select(ExamCycle).filter(
+                ExamCycle.id == cycle_id,
+                ExamCycle.created_by == current_user.id
+            )
+        )
     cycle = result.scalar_one_or_none()
     if not cycle:
         raise HTTPException(status_code=404, detail="Exam cycle not found.")
@@ -207,7 +220,7 @@ async def update_exam_cycle(
 
     return ApiResponse(data=ExamCycleResponse(
         id=str(cycle.id),
-        school_id=str(cycle.school_id),
+        school_id=str(cycle.school_id) if cycle.school_id else None,
         name=cycle.name,
         start_date=cycle.start_date.isoformat() if cycle.start_date else None,
         end_date=cycle.end_date.isoformat() if cycle.end_date else None,

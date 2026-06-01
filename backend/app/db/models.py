@@ -75,7 +75,7 @@ class ExamCycle(Base):
     __tablename__ = "exam_cycles"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    school_id = Column(UUID(as_uuid=True), ForeignKey("schools.id"), nullable=False, index=True)
+    school_id = Column(UUID(as_uuid=True), ForeignKey("schools.id"), nullable=True, index=True)
     name = Column(String(255), nullable=False)  # e.g., "Mid-Term Oct 2026"
     start_date = Column(DateTime(timezone=True), nullable=True)
     end_date = Column(DateTime(timezone=True), nullable=True)

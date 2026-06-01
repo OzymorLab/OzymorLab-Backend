@@ -26,7 +26,7 @@ class ExamCycleUpdate(BaseModel):
 class ExamCycleResponse(BaseModel):
     """Response for a single exam cycle."""
     id: str
-    school_id: str
+    school_id: Optional[str] = None
     name: str
     start_date: Optional[str] = None
     end_date: Optional[str] = None
