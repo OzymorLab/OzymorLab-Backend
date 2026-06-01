@@ -11,6 +11,15 @@ celery_app = Celery(
     backend=settings.CELERY_RESULT_BACKEND,
 )
 
+# Resilient SSL certificate configuration for secure Upstash Redis (rediss://)
+is_secure_broker = settings.CELERY_BROKER_URL.startswith("rediss://")
+is_secure_backend = settings.CELERY_RESULT_BACKEND.startswith("rediss://")
+
+celery_app.conf.update(
+    broker_use_ssl={"ssl_cert_reqs": 0} if is_secure_broker else False,
+    redis_backend_use_ssl={"ssl_cert_reqs": 0} if is_secure_backend else False,
+)
+
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
