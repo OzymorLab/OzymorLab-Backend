@@ -117,9 +117,10 @@ def decode_supabase_token(token: str, jwks: dict = None) -> dict:
     Decodes and validates a Supabase JWT token using JWKS (public key) or fallback secret.
     """
     try:
-        # Get unverified header to check the 'kid'
+        # Get unverified header to check the 'kid' and 'alg'
         unverified_header = jwt.get_unverified_header(token)
         kid = unverified_header.get("kid")
+        alg = unverified_header.get("alg", "HS256")
         
         # If JWKS is available and kid exists, attempt public key verification
         if jwks and kid:
@@ -130,18 +131,20 @@ def decode_supabase_token(token: str, jwks: dict = None) -> dict:
                     return jwt.decode(
                         token,
                         key,
-                        algorithms=["RS256", "ES256"],
+                        algorithms=[alg, "RS256", "ES256", "HS256"],
                         audience="authenticated"
                     )
                 except Exception as e:
                     logger.debug(f"JWKS public key decoding failed, checking fallback secret: {e}")
+                    if not settings.SUPABASE_JWT_SECRET:
+                        raise e
         
         # Fallback to symmetric key verification if secret is configured
         if settings.SUPABASE_JWT_SECRET:
             return jwt.decode(
                 token,
                 settings.SUPABASE_JWT_SECRET,
-                algorithms=["HS256"],
+                algorithms=[alg, "HS256", "RS256"],
                 audience="authenticated"
             )
         
