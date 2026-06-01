@@ -30,7 +30,10 @@ def get_client(api_key: str | None = None) -> genai.Client:
 
     # Use cached system client
     if _client is None or _client_key != key:
-        _client = genai.Client(api_key=key)
+        if key:
+            _client = genai.Client(api_key=key)
+        else:
+            _client = genai.Client()  # Fall back to SDK's automatic environment variable checking
         _client_key = key
     return _client
 
