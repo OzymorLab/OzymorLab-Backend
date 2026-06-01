@@ -6,7 +6,7 @@ from fastapi import Request
 import json
 import re
 from typing import List, Optional
-
+import logging
 import csv
 import io
 from fastapi.responses import StreamingResponse
