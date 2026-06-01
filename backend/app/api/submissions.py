@@ -1,6 +1,8 @@
 """
 Submissions API — file upload, bulk upload, status tracking, grade retrieval.
 """
+from app.utils.idempotency import idempotent
+from fastapi import Request
 import json
 import re
 from typing import List, Optional
@@ -29,9 +31,10 @@ from app.services.auth_service import (
 from app.config import settings
 
 router = APIRouter(
-    prefix="/submissions", 
+    prefix="/submissions",
     tags=["Submissions"],
-    dependencies=[Depends(require_role(["teacher", "admin", "hod", "principal", "student"]))]
+    dependencies=[Depends(require_role(
+        ["teacher", "admin", "hod", "principal", "student"]))]
 )
 
 
@@ -72,14 +75,16 @@ async def create_submission(
     # Upload to S3
     content_type = file.content_type or "application/octet-stream"
     user_token = request.headers.get("Authorization")
-    file_key = upload_file(file_data, filename, content_type, user_token=user_token)
+    file_key = upload_file(file_data, filename,
+                           content_type, user_token=user_token)
 
     # Determine file type
-    file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "pdf"
+    file_type = filename.rsplit(
+        ".", 1)[-1].lower() if "." in filename else "pdf"
 
     # Clean up student_id if it's the legacy dummy string
     if student_id and not student_id.replace('-', '').isalnum() and len(student_id) < 30:
-        student_id = None # Ignore dummy strings, let OCR handle it
+        student_id = None  # Ignore dummy strings, let OCR handle it
 
     # Check if student_id is a valid UUID
     db_student_id = None
@@ -139,7 +144,8 @@ async def get_submission(submission_id: str, db: AsyncSession = Depends(get_db),
     try:
         sub_uuid = uuid.UUID(submission_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
+        raise HTTPException(
+            status_code=400, detail="Invalid submission UUID format")
 
     # BOLA / IDOR isolation check
     await check_submission_access(sub_uuid, current_user, db)
@@ -198,18 +204,22 @@ async def export_submissions_csv(
     # Generate CSV in memory
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Submission ID", "Student ID", "File Name", "Status", "Total Marks", "Created At"])
+    writer.writerow(["Submission ID", "Student ID", "File Name",
+                    "Status", "Total Marks", "Created At"])
 
     for s in submissions:
-        total_marks = sum(r.grade for r in s.grade_results) if s.grade_results else 0.0
-        writer.writerow([str(s.id), str(s.student_id), s.file_name, s.status, total_marks, s.created_at.isoformat()])
+        total_marks = sum(
+            r.grade for r in s.grade_results) if s.grade_results else 0.0
+        writer.writerow([str(s.id), str(s.student_id), s.file_name,
+                        s.status, total_marks, s.created_at.isoformat()])
 
     output.seek(0)
-    
+
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=export_task_{task_id}.csv"}
+        headers={
+            "Content-Disposition": f"attachment; filename=export_task_{task_id}.csv"}
     )
 
 
@@ -228,12 +238,13 @@ async def list_submissions(
         try:
             task_uuid = uuid.UUID(task_id)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid task UUID format")
-        
+            raise HTTPException(
+                status_code=400, detail="Invalid task UUID format")
+
         # BOLA / IDOR isolation check
         await check_task_access(task_uuid, current_user, db)
         query = query.filter_by(task_id=task_uuid)
-    
+
     # Enforce student-level isolation for the list endpoint as well
     if current_user.role == "student":
         from sqlalchemy import func
@@ -251,7 +262,7 @@ async def list_submissions(
 
     if status:
         query = query.filter_by(status=status)
-        
+
     query = query.offset(skip).limit(limit)
 
     result = await db.execute(query)
@@ -271,7 +282,8 @@ async def get_submission_grade(submission_id: str, db: AsyncSession = Depends(ge
     try:
         sub_uuid = uuid.UUID(submission_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid submission UUID format")
+        raise HTTPException(
+            status_code=400, detail="Invalid submission UUID format")
 
     # BOLA / IDOR isolation check
     sub_or_ws = await check_submission_access(sub_uuid, current_user, db)
@@ -285,15 +297,17 @@ async def get_submission_grade(submission_id: str, db: AsyncSession = Depends(ge
                 score = float(sub_or_ws.grade.replace('%', '').strip())
             except ValueError:
                 pass
-                
+
         step_grades = []
         if sub_or_ws.questions:
             q_count = len(sub_or_ws.questions)
             for idx, q in enumerate(sub_or_ws.questions):
                 step_grades.append(StepGradeResult(
                     step_num=idx + 1,
-                    marks_awarded=int(round(score / q_count)) if q_count > 0 else 0,
-                    max_marks=int(round(100.0 / q_count)) if q_count > 0 else 0,
+                    marks_awarded=int(round(score / q_count)
+                                      ) if q_count > 0 else 0,
+                    max_marks=int(round(100.0 / q_count)
+                                  ) if q_count > 0 else 0,
                     grade_distribution=[1.0],
                     justification="Evaluation completed successfully.",
                     error_type=None,
@@ -309,7 +323,7 @@ async def get_submission_grade(submission_id: str, db: AsyncSession = Depends(ge
                 error_type=None,
                 sympy_valid=True
             ))
-            
+
         response = GradeResultResponse(
             id=str(sub_or_ws.id),
             submission_id=str(sub_or_ws.id),
@@ -332,7 +346,8 @@ async def get_submission_grade(submission_id: str, db: AsyncSession = Depends(ge
     )
     grade = result.scalar_one_or_none()
     if not grade:
-        raise HTTPException(status_code=404, detail="No grade result found for this submission")
+        raise HTTPException(
+            status_code=404, detail="No grade result found for this submission")
 
     step_grades = [StepGradeResult(**sg) for sg in (grade.step_grades or [])]
 
@@ -453,13 +468,16 @@ async def bulk_upload_submissions(
         # Upload to S3
         content_type = upload_file_obj.content_type or "application/octet-stream"
         try:
-            file_key = upload_file(file_data, filename, content_type, user_token=user_token)
+            file_key = upload_file(file_data, filename,
+                                   content_type, user_token=user_token)
         except Exception as e:
-            failed.append({"file": filename, "error": f"S3 upload failed: {str(e)}"})
+            failed.append(
+                {"file": filename, "error": f"S3 upload failed: {str(e)}"})
             continue
 
         # Determine file type
-        file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "pdf"
+        file_type = filename.rsplit(
+            ".", 1)[-1].lower() if "." in filename else "pdf"
 
         # Check if student_id is a valid UUID
         db_student_id = None
@@ -495,16 +513,21 @@ async def bulk_upload_submissions(
         db.add(submission)
         await db.flush()
 
-        # Queue Celery parse task
+       # Queue Celery parse task
         try:
             from app.tasks.parse_submission import parse
             parse.delay(str(submission.id))
         except Exception as celery_err:
-            import logging
-            logging.getLogger(__name__).warning(
-                f"Celery enqueue failed for submission {submission.id}: {celery_err}. "
-                "Saved as PENDING — grading can be triggered via /submissions/bulk-grade."
+            logger = logging.getLogger(__name__)
+            logger.error(
+                f"Celery enqueue failed for submission {submission.id}: {celery_err}"
             )
+            # Mark submission as FAILED so it's visible, not silently stuck
+            submission.status = "FAILED"
+            submission.error_message = f"Parse queue failed: {str(celery_err)}"
+            failed.append(
+                {"file": filename, "error": f"Parse queue failed: {str(celery_err)}"})
+            continue  # Don't count this as submitted
 
         submitted.append({
             "submission_id": str(submission.id),
@@ -519,7 +542,7 @@ async def bulk_upload_submissions(
         "submissions": submitted,
         "errors": failed,
         "message": f"{len(submitted)} answer sheets queued for parsing"
-            + (f", {len(failed)} failed" if failed else ""),
+        + (f", {len(failed)} failed" if failed else ""),
     })
 
 
@@ -529,9 +552,6 @@ class BulkGradeRequest(BaseModel):
     description: str = ""
     temperature: float = Field(default=0.0, ge=0.0, le=1.0)
 
-
-from fastapi import Request
-from app.utils.idempotency import idempotent
 
 @router.post("/bulk-grade")
 @idempotent()
@@ -559,14 +579,15 @@ async def bulk_grade_submissions(
     )
     rubric = rubric_result.scalar_one_or_none()
     if not rubric:
-        raise HTTPException(status_code=400, detail="No active rubric found for this task.")
+        raise HTTPException(
+            status_code=400, detail="No active rubric found for this task.")
 
     # Phase 4: Rubric approval gate — only APPROVED rubrics can be used for grading
     if rubric.approval_status != "APPROVED":
         raise HTTPException(
             status_code=400,
             detail=f"Rubric is '{rubric.approval_status}'. Only APPROVED rubrics can be used for grading. "
-                   f"Submit the rubric for HOD approval first.",
+            f"Submit the rubric for HOD approval first.",
         )
 
     # Count parsed submissions
@@ -576,19 +597,48 @@ async def bulk_grade_submissions(
     submissions = sub_result.scalars().all()
 
     if not submissions:
-        # Check if there are any pending/parsing submissions
-        pending_result = await db.execute(
+        # Check all statuses to give a clear error
+        all_result = await db.execute(
             select(Submission).filter_by(task_id=task.id)
-            .filter(Submission.status.in_(["PENDING", "PARSING"]))
         )
-        pending = pending_result.scalars().all()
-        if pending:
+        all_subs = all_result.scalars().all()
+
+        if not all_subs:
+            raise HTTPException(
+                status_code=400, detail="No submissions found for this task. Upload answer sheets first.")
+
+        status_counts = {}
+        for s in all_subs:
+            status_counts[s.status] = status_counts.get(s.status, 0) + 1
+
+        pending = status_counts.get("PENDING", 0)
+        parsing = status_counts.get("PARSING", 0)
+        failed = status_counts.get("FAILED", 0)
+
+        if pending > 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"{len(pending)} submissions are still being parsed. Wait for parsing to complete."
+                detail=(
+                    f"{pending} submission(s) are stuck in PENDING — Celery worker may be down or "
+                    f"the parse queue failed. Check worker logs and re-trigger parsing. "
+                    f"Status breakdown: {status_counts}"
+                )
             )
-        raise HTTPException(status_code=400, detail="No parsed submissions to grade.")
+        if parsing > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{parsing} submission(s) are still being parsed. Wait for parsing to complete. Status breakdown: {status_counts}"
+            )
+        if failed > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{failed} submission(s) failed during parsing. Re-upload or re-trigger parsing. Status breakdown: {status_counts}"
+            )
 
+        raise HTTPException(
+            status_code=400,
+            detail=f"No parsed submissions to grade. Current statuses: {status_counts}"
+        )
     # Create grading run
     model = settings.GEMINI_MODEL
     run = GradingRun(
@@ -623,3 +673,55 @@ async def bulk_grade_submissions(
         "message": f"Grading started for {len(submissions)} submissions",
     })
 
+
+@router.post("/retry-pending")
+async def retry_pending_submissions(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role(
+        ["teacher", "admin", "hod", "principal"])),
+):
+    """Re-enqueue all PENDING or FAILED submissions for a task into the parse pipeline."""
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task UUID format")
+
+    await check_task_access(task_uuid, current_user, db)
+
+    result = await db.execute(
+        select(Submission).filter(
+            Submission.task_id == task_uuid,
+            Submission.status.in_(["PENDING", "FAILED"])
+        )
+    )
+    submissions = result.scalars().all()
+
+    if not submissions:
+        raise HTTPException(
+            status_code=404, detail="No PENDING or FAILED submissions found for this task.")
+
+    requeued = []
+    failed_requeue = []
+
+    from app.tasks.parse_submission import parse
+    for sub in submissions:
+        try:
+            sub.status = "PENDING"
+            sub.error_message = None
+            parse.delay(str(sub.id))
+            requeued.append(str(sub.id))
+        except Exception as e:
+            failed_requeue.append(
+                {"submission_id": str(sub.id), "error": str(e)})
+
+    await db.commit()
+
+    return ApiResponse(data={
+        "requeued": len(requeued),
+        "failed_to_requeue": len(failed_requeue),
+        "submission_ids": requeued,
+        "errors": failed_requeue,
+        "message": f"{len(requeued)} submissions re-enqueued for parsing."
+        + (f" {len(failed_requeue)} failed — Celery worker may be down." if failed_requeue else ""),
+    })
