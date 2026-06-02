@@ -97,6 +97,23 @@ async def start_run(run_id: str, db: AsyncSession = Depends(get_db), current_use
     if run.status != "CREATED":
         raise HTTPException(status_code=400, detail=f"Run already in status: {run.status}")
 
+    # Expire stale PENDING/PARSING submissions and re-queue them before we
+    # decide how many are PARSED — same logic as bulk-grade endpoint.
+    from fastapi import BackgroundTasks as _BackgroundTasks
+    from app.api.submissions import _expire_and_requeue_stale
+    _bg = _BackgroundTasks()
+    reset_counts = await _expire_and_requeue_stale(run.task_id, db, _bg)
+    # Fire re-queued parse tasks as asyncio tasks (BackgroundTasks not available here)
+    for task_item in _bg.tasks:
+        func = task_item["func"]
+        args = task_item.get("args", ())
+        kwargs = task_item.get("kwargs", {})
+        import inspect
+        if inspect.iscoroutinefunction(func):
+            asyncio.create_task(func(*args, **kwargs))
+        else:
+            asyncio.get_event_loop().run_in_executor(None, lambda: func(*args, **kwargs))
+
     # Get all parsed submissions for this task — ignore PENDING/FAILED, grade what's ready
     sub_result = await db.execute(
         select(Submission).filter_by(task_id=run.task_id, status="PARSED")
@@ -148,6 +165,7 @@ async def start_run(run_id: str, db: AsyncSession = Depends(get_db), current_use
         "status": "RUNNING",
         "submissions_queued": len(submissions),
         "submissions_skipped": skipped_counts,
+        "submissions_reset": reset_counts,
         "message": (
             f"Grading started for {len(submissions)} parsed submission(s). "
             + (

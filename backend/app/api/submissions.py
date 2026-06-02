@@ -52,71 +52,23 @@ def is_valid_uuid(val: str) -> bool:
 
 async def process_submission_background(submission_id: str):
     """
-    Background task to process a submission without Celery.
-    Handles: parsing, OCR, content extraction, and auto-grading if enabled.
+    Background task: upload → parse → ready for grading.
+    Runs fully independently per submission — unaffected by any other
+    submission's state. Uses the same parse pipeline as the task module.
     """
-    from app.db.session import async_session_factory
-    from app.services.parsing import parse_submission_content
-    from app.services.grading import grade_submission
+    from app.tasks.parse_submission import parse as _parse
 
-    logger.info(
-        f"Starting background processing for submission {submission_id}")
-
-    # Create a new database session for background task
-    async with async_session_factory() as db:
-        try:
-            # Get submission
-            sub_uuid = uuid.UUID(submission_id)
-            submission = await db.get(Submission, sub_uuid)
-
-            if not submission:
-                logger.error(f"Submission {submission_id} not found")
-                return
-
-            # Update status to PROCESSING
-            submission.status = "PARSING"
-            await db.commit()
-            logger.info(
-                f"Submission {submission_id} status updated to PARSING")
-
-            # Parse the submission content (OCR, text extraction, etc.)
-            parsed_content = await parse_submission_content(submission.file_key)
-
-            # Update with parsed content
-            submission.status = "PARSED"
-            submission.parsed_content = parsed_content.dict() if parsed_content else None
-            submission.raw_text = parsed_content.raw_text if parsed_content else None
-            await db.commit()
-            logger.info(f"Submission {submission_id} successfully parsed")
-
-            # Auto-grade if enabled in settings
-            if hasattr(settings, 'AUTO_GRADE_ON_UPLOAD') and settings.AUTO_GRADE_ON_UPLOAD:
-                submission.status = "GRADING"
-                await db.commit()
-                logger.info(f"Auto-grading submission {submission_id}")
-
-                grade_result = await grade_submission(submission.id)
-
-                submission.status = "GRADED"
-                await db.commit()
-                logger.info(f"Submission {submission_id} successfully graded")
-            else:
-                logger.info(
-                    f"Submission {submission_id} ready for manual grading")
-
-        except Exception as e:
-            logger.error(
-                f"Failed to process submission {submission_id}: {str(e)}", exc_info=True)
-            # Update submission status to FAILED
-            try:
-                sub_uuid = uuid.UUID(submission_id)
-                submission = await db.get(Submission, sub_uuid)
-                if submission:
-                    submission.status = "FAILED"
-                    submission.error_message = str(e)
-                    await db.commit()
-            except Exception as db_error:
-                logger.error(f"Failed to update submission status: {db_error}")
+    logger.info(f"[Background] Starting parse for submission {submission_id}")
+    try:
+        await _parse(submission_id)
+        logger.info(f"[Background] Submission {submission_id} parsed and ready")
+    except Exception as e:
+        # _parse already marks the submission as FAILED in the DB on any error,
+        # so we just log here to avoid double-handling.
+        logger.error(
+            f"[Background] Parse task raised for submission {submission_id}: {e}",
+            exc_info=True,
+        )
 
 
 @router.post("")
@@ -612,6 +564,52 @@ async def bulk_upload_submissions(
     })
 
 
+from datetime import datetime, timezone, timedelta
+
+# Submissions stuck in PENDING or PARSING longer than this are considered dead
+# and are automatically re-queued for parsing.
+_STALE_THRESHOLD_MINUTES = 10
+
+
+async def _expire_and_requeue_stale(
+    task_id,
+    db: AsyncSession,
+    background_tasks: BackgroundTasks,
+) -> dict[str, int]:
+    """
+    Mark stale PENDING/PARSING submissions as FAILED and immediately
+    re-queue them for parsing. Returns a dict of how many were reset per status.
+
+    A submission is considered stale if it has been in PENDING or PARSING
+    for longer than _STALE_THRESHOLD_MINUTES without completing.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=_STALE_THRESHOLD_MINUTES)
+    stale_result = await db.execute(
+        select(Submission).filter(
+            Submission.task_id == task_id,
+            Submission.status.in_(["PENDING", "PARSING"]),
+            Submission.updated_at < cutoff,
+        )
+    )
+    stale_subs = stale_result.scalars().all()
+
+    reset_counts: dict[str, int] = {}
+    for sub in stale_subs:
+        old_status = sub.status
+        sub.status = "PENDING"          # reset to PENDING so background task picks it up fresh
+        sub.error_message = f"Auto-reset: was stuck in {old_status} for >{_STALE_THRESHOLD_MINUTES}min"
+        reset_counts[old_status] = reset_counts.get(old_status, 0) + 1
+        background_tasks.add_task(process_submission_background, str(sub.id))
+
+    if stale_subs:
+        await db.flush()
+        logger.info(
+            f"[StaleExpiry] Reset {len(stale_subs)} stale submission(s) for task {task_id}: {reset_counts}"
+        )
+
+    return reset_counts
+
+
 class BulkGradeRequest(BaseModel):
     """Request to start grading all parsed submissions for a task."""
     task_id: str
@@ -657,6 +655,13 @@ async def bulk_grade_submissions(
             f"Submit the rubric for HOD approval first.",
         )
 
+    # ── Stale-submission cleanup ──────────────────────────────────────────────
+    # Any submission stuck in PENDING or PARSING for >10 min is dead (server
+    # probably restarted mid-parse). Reset it to PENDING and re-queue it so it
+    # gets a fresh parse attempt. This runs before we check for PARSED submissions
+    # so a re-triggered submission that finishes quickly can still be graded.
+    reset_counts = await _expire_and_requeue_stale(task.id, db, background_tasks)
+
     # Count parsed submissions
     sub_result = await db.execute(
         select(Submission).filter_by(task_id=task.id, status="PARSED")
@@ -682,13 +687,16 @@ async def bulk_grade_submissions(
         for s in all_subs:
             status_counts[s.status] = status_counts.get(s.status, 0) + 1
 
+        reset_msg = (
+            f" {sum(reset_counts.values())} stale submission(s) have been auto-reset and re-queued."
+            if reset_counts else ""
+        )
         raise HTTPException(
             status_code=400,
             detail=(
                 f"No submissions are ready to grade yet. "
-                f"Status breakdown: {status_counts}. "
-                f"Wait for parsing to finish or use POST /submissions/retry-pending "
-                f"to re-queue stuck submissions."
+                f"Status breakdown: {status_counts}.{reset_msg} "
+                f"Wait a moment for parsing to finish, then try again."
             ),
         )
 
@@ -749,6 +757,7 @@ async def bulk_grade_submissions(
         "status": "RUNNING",
         "submissions_queued": len(submissions),
         "submissions_skipped": skipped_counts,
+        "submissions_reset": reset_counts,
         "rubric_version": rubric.version,
         "message": warning or f"Grading started for {len(submissions)} submissions",
     })
