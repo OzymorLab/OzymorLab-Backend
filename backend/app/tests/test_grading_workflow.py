@@ -86,11 +86,8 @@ async def test_bulk_grade_idempotency_locking():
     result_mock.scalars.return_value.all.return_value = [sub_mock]
     db_mock.execute.return_value = result_mock
 
-    # Mock Celery delay enqueues to avoid task running
-    with patch("app.tasks.grade_submission.grade.s") as grade_s_mock, \
-         patch("app.tasks.grade_submission.finalize_run.si") as finalize_si_mock, \
-         patch("celery.chord") as chord_mock:
-         
+    # Patch asyncio.create_task to avoid background grading running in tests
+    with patch("asyncio.create_task") as create_task_mock:
         payload = BulkGradeRequest(
             task_id=str(task_mock.id),
             description="Test bulk grade",

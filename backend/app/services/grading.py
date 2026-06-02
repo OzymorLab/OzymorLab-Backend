@@ -134,7 +134,7 @@ def grade_submission(
             component_results.append(result)
 
         elif ctype == "diagram":
-            # ── Diagram Evaluation Pipeline (via DEIS) ──
+            # ── Diagram Evaluation Pipeline (Gemini Vision primary, DEIS parallel) ──
             if file_key:
                 # Find the rubric step with diagram_relations
                 component_step_nums = set(component.get("rubric_steps", []))
@@ -146,22 +146,33 @@ def grade_submission(
                 if diagram_rubric_step:
                     actual_file_key = parsed_content.get(
                         "diagram_file_key") or file_key
-                    result = evaluate_diagram_step(
-                        file_key=actual_file_key,
-                        rubric_step=diagram_rubric_step,
-                        question_id=rubric.get("task_id", ""),
-                        submission_id=submission_id or "",
-                    )
-                    # Cache the DEIS result for the label pipeline
-                    deis_result_cache = result.get("_deis_raw", result)
+                    try:
+                        result = evaluate_diagram_step(
+                            file_key=actual_file_key,
+                            rubric_step=diagram_rubric_step,
+                            question_id=rubric.get("task_id", ""),
+                            submission_id=submission_id or "",
+                        )
+                    except Exception as e:
+                        logger.error(f"Diagram evaluation raised: {e}")
+                        result = _zero_component(
+                            "diagram", component,
+                            justification=f"Diagram evaluation failed: {e}"
+                        )
+                        result["label_scores"] = []
+
+                    # Cache the full diagram result for the label pipeline.
+                    # Both Gemini Vision and DEIS write label_scores into _deis_raw.
+                    deis_result_cache = result.get("_deis_raw") or result
 
                     component_results.append({
                         "type": "diagram",
                         "marks_awarded": result.get("marks_awarded", 0),
                         "max_marks": result.get("max_marks", component.get("max_marks", 0)),
-                        "confidence": result.get("deis_confidence", 0.5),
+                        "confidence": result.get("deis_confidence", result.get("confidence", 0.5)),
                         "grade_distribution": result.get("grade_distribution", [1.0]),
                         "justification": result.get("justification", ""),
+                        "evaluator": result.get("evaluator", "unknown"),
                     })
                 else:
                     component_results.append(
@@ -251,7 +262,7 @@ def _zero_component(ctype: str, component: dict, justification: str = "") -> dic
     dist = [0.0] * (max_marks + 1) if max_marks > 0 else [1.0]
     if dist:
         dist[0] = 1.0
-    return {
+    result = {
         "type": ctype,
         "marks_awarded": 0,
         "max_marks": max_marks,
@@ -259,22 +270,16 @@ def _zero_component(ctype: str, component: dict, justification: str = "") -> dic
         "grade_distribution": dist,
         "justification": justification or f"No {ctype} evaluation performed.",
     }
+    if ctype in ("diagram", "labels"):
+        result["label_scores"] = []
+        result["_deis_raw"] = None
+    return result
 
 
 async def grade_submission_background(submission_id: str, grading_run_id: str):
-    """Background task to grade a single submission."""
-    from app.db.session import async_session_factory
-    import logging
-
-    logger = logging.getLogger(__name__)
-
-    async with async_session_factory() as db:
-        try:
-            # Your existing grading logic here
-            # Update grade result and run status
-            pass
-        except Exception as e:
-            logger.error(f"Grading failed for submission {submission_id}: {e}")
+    """Background task to grade a single submission (used by bulk-grade endpoint)."""
+    from app.tasks.grade_submission import grade
+    await grade(submission_id, grading_run_id)
 
 
 def _extract_step_grades(component_results: list[dict]) -> list[dict]:

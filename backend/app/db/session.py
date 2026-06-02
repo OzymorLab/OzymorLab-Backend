@@ -40,23 +40,6 @@ class Base(DeclarativeBase):
     pass
 
 
-# Sync engine for Celery workers
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-sync_engine = create_engine(
-    settings.DATABASE_URL_SYNC,
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True,
-)
-sync_session_factory = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
-
-def get_sync_session():
-    """Returns a new synchronous Session from the shared engine."""
-    return sync_session_factory()
-
-
 async def get_db() -> AsyncSession:
     """FastAPI dependency — yields an async DB session."""
     async with async_session_factory() as session:

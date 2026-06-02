@@ -1,1 +1,1 @@
-"""AIOS Celery Tasks Package."""
+"""AIOS Background Tasks Package."""

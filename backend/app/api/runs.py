@@ -1,6 +1,7 @@
 """
 Runs API — grading run management, batch grading, statistics, drift.
 """
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -108,17 +109,27 @@ async def start_run(run_id: str, db: AsyncSession = Depends(get_db), current_use
     run.status = "RUNNING"
     run.total_submissions = len(submissions)
     await db.flush()
+    await db.commit()
 
-    # Enqueue grading tasks
-    from app.tasks.grade_submission import grade, finalize_run
-    from celery import chain, chord
+    # Launch grading pipeline as a fire-and-forget asyncio task.
+    # grade_and_finalize grades every submission sequentially then calls
+    # finalize_run once all are done — no Celery/Redis required.
+    from app.tasks.grade_submission import grade as grade_task, finalize_run
 
-    grade_tasks = [grade.s(str(sub.id), str(run.id)) for sub in submissions]
-    callback = finalize_run.si(str(run.id))
-    chord(grade_tasks)(callback)
+    run_id_str = str(run.id)
+    sub_ids = [str(sub.id) for sub in submissions]
+
+    async def grade_and_finalize():
+        await asyncio.gather(
+            *[grade_task(sub_id, run_id_str) for sub_id in sub_ids],
+            return_exceptions=True,
+        )
+        await finalize_run(run_id_str)
+
+    asyncio.create_task(grade_and_finalize())
 
     return ApiResponse(data={
-        "run_id": str(run.id),
+        "run_id": run_id_str,
         "status": "RUNNING",
         "submissions_queued": len(submissions),
         "message": f"Grading started for {len(submissions)} submissions",

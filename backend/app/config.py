@@ -1,7 +1,7 @@
 """
 AIOS Configuration — Pydantic Settings loaded from environment variables.
 """
-import os  # Add this import
+import os
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from pydantic_settings import BaseSettings
 from pydantic import Field
@@ -20,16 +20,11 @@ class Settings(BaseSettings):
     DATABASE_URL_SYNC: str = "postgresql://aios:aios_secret@postgres:5432/aios"
     DIRECT_URL: str = ""
 
-    # ── Redis (Optional - only needed if you keep Celery) ──
-    REDIS_URL: str = "redis://redis:6379/0"
-
     # ── Auto Grading Setting ──
     AUTO_GRADE_ON_UPLOAD: bool = Field(
         default=False,
         description="Automatically grade submissions after successful parsing"
     )
-    # Or keep the os.getenv version (but add os import at top):
-    # AUTO_GRADE_ON_UPLOAD = os.getenv("AUTO_GRADE_ON_UPLOAD", "False").lower() == "true"
 
     # ── AWS S3 (Storage) ──
     AWS_ACCESS_KEY_ID: str = ""
@@ -57,11 +52,6 @@ class Settings(BaseSettings):
     # ── Label Validation ──
     LABEL_FUZZY_THRESHOLD: int = 80  # 0-100, minimum similarity score for label match
 
-    # ── Celery (Optional - can be removed if not using) ──
-    # If you're removing Celery completely, you can comment these out
-    CELERY_BROKER_URL: str = ""
-    CELERY_RESULT_BACKEND: str = ""
-
     # ── JWT Auth ──
     JWT_SECRET_KEY: str = "edexia-secret-change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
@@ -72,7 +62,7 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = ""
     SUPABASE_ANON_KEY: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""  # Service role key to bypass RLS in backend
-    SUPABASE_JWT_SECRET: str = ""  # Symmetric verification fallback key
+    SUPABASE_JWT_SECRET: str = ""        # Symmetric verification fallback key
     SUPABASE_STORAGE_BUCKET: str = "aios-submissions"
 
     # ── Rate Limiting ──
@@ -87,19 +77,11 @@ class Settings(BaseSettings):
         # Security: Remove localhost/loopback origins in production environment
         if self.APP_ENV.lower() == "production":
             origins = [
-                o for o in origins if "localhost" not in o and "127.0.0.1" not in o]
+                o for o in origins
+                if "localhost" not in o and "127.0.0.1" not in o
+            ]
 
         return origins
-
-    @property
-    def celery_broker(self) -> str:
-        """Returns CELERY_BROKER_URL, falling back to REDIS_URL if empty."""
-        return self.CELERY_BROKER_URL or self.REDIS_URL
-
-    @property
-    def celery_backend(self) -> str:
-        """Returns CELERY_RESULT_BACKEND, falling back to REDIS_URL if empty."""
-        return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
     class Config:
         env_file = (".env", "../.env")
@@ -112,8 +94,7 @@ settings = Settings()
 
 # ── PgBouncer Connection String Sanitization ──
 # Strip pgbouncer query parameters from the database connection strings.
-# This prevents asyncpg and psycopg2 from throwing TypeError: connect() got an unexpected keyword argument 'pgbouncer'
-
+# This prevents asyncpg and psycopg2 from throwing unexpected keyword argument errors.
 
 def _strip_pgbouncer(url_str: str) -> str:
     if not url_str or "pgbouncer" not in url_str:

@@ -52,15 +52,15 @@ def evaluate_label_component(
             "justification": "No expected labels found in the rubric for this component.",
         }
 
-    # Extract detected labels from DEIS result
+    # Extract detected labels from diagram evaluation result (DEIS or Gemini Vision).
+    # Both evaluators write `label_scores` with the same schema:
+    #   [{"expected": str, "text": str, "matched": bool, "target_region": str}]
     detected_labels = []
     if deis_result:
-        # Option A: DEIS returns label_scores directly
+        # Primary: label_scores from DEIS scoring worker OR Gemini Vision evaluator
         detected_labels = deis_result.get("label_scores", [])
         if not detected_labels:
-            # Fallback: extract from missing_components
-            missing = deis_result.get("missing_components", [])
-            # The DEIS result might have the scene graph with label nodes
+            # Fallback A: scene_graph nodes (DEIS raw output)
             scene_graph = deis_result.get("scene_graph", {})
             if scene_graph:
                 nodes = scene_graph.get("nodes", [])
@@ -69,6 +69,15 @@ def evaluate_label_component(
                         detected_labels.append({
                             "text": node.get("text", node.get("id", "")),
                             "matched": True,
+                        })
+            # Fallback B: Gemini raw label_results
+            if not detected_labels:
+                gemini_raw = deis_result.get("_gemini_raw") or {}
+                for lr in gemini_raw.get("label_results", []):
+                    if lr.get("matched") or lr.get("detected_text"):
+                        detected_labels.append({
+                            "text": lr.get("detected_text") or "",
+                            "matched": bool(lr.get("matched", False)),
                         })
 
     # Match detected labels against expected labels

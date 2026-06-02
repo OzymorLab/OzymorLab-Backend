@@ -11,10 +11,6 @@ asyncpg==0.30.0
 alembic==1.15.2
 psycopg2-binary==2.9.10
 
-# ── Celery (async tasks) ──
-celery[redis]==5.5.2
-redis==5.3.0
-
 # ── Google Gemini AI ──
 google-genai==1.16.1
 

@@ -96,9 +96,8 @@ import traceback
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch-all: logs the exception and returns a 500 WITH CORS headers.
-    Without this, unhandled exceptions (e.g. Celery broker down) can bypass
-    CORSMiddleware in ASGI edge cases, causing browsers to see a CORS error
-    instead of the real server error.
+    Without this, unhandled exceptions can bypass CORSMiddleware in ASGI edge
+    cases, causing browsers to see a CORS error instead of the real server error.
     """
     logger.error(
         f"Unhandled exception on {request.method} {request.url.path}:\n"

@@ -726,7 +726,7 @@ async def bulk_grade_submissions(
     await db.refresh(run)
 
     # Grade each submission in background tasks
-    from app.tasks.grade_submission import grade_submission_background
+    from app.services.grading import grade_submission_background
 
     for submission in submissions:
         background_tasks.add_task(

@@ -3,7 +3,7 @@
 Welcome to the **Edexia AIOS Backend**, the core orchestration layer for processing, parsing, and evaluating handwritten student answer sheets at an institutional scale.
 
 ## What is this repository?
-This is the **Core Monolith**. It acts as the brain of the Edexia Assessment Engine. It handles everything from student file uploads to the final LLM-driven grading justification. It coordinates parsing, dynamic rubric injection, mathematical equation verification, and orchestrates async evaluation workflows using Celery and Redis.
+This is the **Core Monolith**. It acts as the brain of the Edexia Assessment Engine. It handles everything from student file uploads to the final LLM-driven grading justification. It coordinates parsing, dynamic rubric injection, mathematical equation verification, and orchestrates async evaluation workflows using FastAPI `BackgroundTasks` and `asyncio`.
 
 ### Core Features:
 - **Multi-Tenant Institutional Architecture**: Built to support large-scale rollouts with robust hierarchical models mapping `Schools`, `ExamCycles`, `Class Standards`, `Sections`, and `Students`. It enforces strict multi-level Role-Based Access Control (RBAC) across Teachers, Evaluators, HODs, and Principals.
@@ -16,7 +16,7 @@ This is the **Core Monolith**. It acts as the brain of the Edexia Assessment Eng
 ## Tech Stack
 - **Framework**: FastAPI (Python 3.12)
 - **Database**: PostgreSQL (SQLAlchemy + Asyncpg + Alembic)
-- **Queuing**: Celery & Redis
+- **Background Tasks**: FastAPI BackgroundTasks + asyncio (no external broker needed)
 - **AI Core**: Google Gemini 2.5 Pro (Multimodal)
 - **Authentication & Storage**: Supabase Auth + Supabase Storage
 
@@ -38,7 +38,7 @@ All services communicate asynchronously using an **Apache Kafka** broker and cac
 
 ## Running the Unified Stack
 
-To start all components (PostgreSQL, Redis, AIOS Web Server, Celery Workers, Kafka, Zookeeper, and all DEIS microservices):
+To start all components (PostgreSQL, AIOS Web Server, Kafka, Zookeeper, and all DEIS microservices):
 
 ```bash
 docker compose up --build
