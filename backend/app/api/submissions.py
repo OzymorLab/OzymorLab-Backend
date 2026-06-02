@@ -52,23 +52,12 @@ def is_valid_uuid(val: str) -> bool:
 
 async def process_submission_background(submission_id: str):
     """
-    Background task: upload → parse → ready for grading.
-    Runs fully independently per submission — unaffected by any other
-    submission's state. Uses the same parse pipeline as the task module.
+    Background entry point: parse → auto-grade (if approved rubric exists).
+    Every answer sheet runs this independently — one sheet's failure or
+    slowness has zero effect on any other.
     """
-    from app.tasks.parse_submission import parse as _parse
-
-    logger.info(f"[Background] Starting parse for submission {submission_id}")
-    try:
-        await _parse(submission_id)
-        logger.info(f"[Background] Submission {submission_id} parsed and ready")
-    except Exception as e:
-        # _parse already marks the submission as FAILED in the DB on any error,
-        # so we just log here to avoid double-handling.
-        logger.error(
-            f"[Background] Parse task raised for submission {submission_id}: {e}",
-            exc_info=True,
-        )
+    from app.tasks.parse_and_grade import parse_and_grade
+    await parse_and_grade(submission_id)
 
 
 @router.post("")
