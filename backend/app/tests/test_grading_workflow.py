@@ -17,7 +17,7 @@ async def test_bulk_grade_unapproved_rubric():
     db_mock = AsyncMock()
     user_mock = MagicMock(spec=User)
     user_mock.id = uuid.uuid4()
-    user_mock.school_id = uuid.uuid4()
+    user_mock.school_id = None  # bypass school-isolation check in check_task_access
 
     # Mock Task
     task_mock = MagicMock(spec=Task)
@@ -63,7 +63,7 @@ async def test_bulk_grade_idempotency_locking():
     db_mock = AsyncMock()
     user_mock = MagicMock(spec=User)
     user_mock.id = uuid.uuid4()
-    user_mock.school_id = uuid.uuid4()
+    user_mock.school_id = None  # bypass school-isolation check in check_task_access
 
     # Mock Task
     task_mock = MagicMock(spec=Task)
