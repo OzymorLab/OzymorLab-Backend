@@ -11,6 +11,9 @@ asyncpg==0.30.0
 alembic==1.15.2
 psycopg2-binary==2.9.10
 
+# ── Redis (used by health check and DEIS gateway) ──
+redis==5.3.0
+
 # ── Google Gemini AI ──
 google-genai==1.16.1
 

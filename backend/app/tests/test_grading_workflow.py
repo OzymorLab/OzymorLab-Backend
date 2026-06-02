@@ -5,7 +5,7 @@ import pytest
 import uuid
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
-from fastapi import HTTPException
+from fastapi import HTTPException, BackgroundTasks
 from app.api.runs import start_run, run_events_stream
 from app.api.submissions import bulk_grade_submissions, BulkGradeRequest
 from app.db.models import GradingRun, Task, TaskRubric, User, Submission
@@ -34,7 +34,6 @@ async def test_bulk_grade_unapproved_rubric():
     result_mock.scalar_one_or_none.side_effect = [task_mock, rubric_mock]
     db_mock.execute.return_value = result_mock
 
-    # Mock Request payload
     payload = BulkGradeRequest(
         task_id=str(task_mock.id),
         description="Test grading",
@@ -43,9 +42,16 @@ async def test_bulk_grade_unapproved_rubric():
 
     request_mock = MagicMock()
     request_mock.headers = {}
+    background_tasks_mock = BackgroundTasks()
 
     with pytest.raises(HTTPException) as exc_info:
-        await bulk_grade_submissions(payload=payload, request=request_mock, db=db_mock, current_user=user_mock)
+        await bulk_grade_submissions(
+            payload=payload,
+            background_tasks=background_tasks_mock,
+            request=request_mock,
+            db=db_mock,
+            current_user=user_mock,
+        )
 
     assert exc_info.value.status_code == 400
     assert "Only APPROVED rubrics" in exc_info.value.detail
@@ -75,19 +81,18 @@ async def test_bulk_grade_idempotency_locking():
 
     # Mock DB executions
     result_mock = MagicMock()
-    # First: idempotency lookup (None), Second: Task lookup, Third: Rubric lookup, Fourth: Submissions count
-    # Let's mock idempotency check separately
     result_mock.scalar_one_or_none.side_effect = [
-        None,  # idempotency lookup: NotFound
+        None,       # idempotency lookup: NotFound
         task_mock,  # task lookup
         rubric_mock,  # rubric lookup
     ]
-    # Submissions search returns a list of sub_mock
     result_mock.scalars.return_value.all.return_value = [sub_mock]
     db_mock.execute.return_value = result_mock
 
+    background_tasks_mock = BackgroundTasks()
+
     # Patch asyncio.create_task to avoid background grading running in tests
-    with patch("asyncio.create_task") as create_task_mock:
+    with patch("asyncio.create_task"):
         payload = BulkGradeRequest(
             task_id=str(task_mock.id),
             description="Test bulk grade",
@@ -97,8 +102,13 @@ async def test_bulk_grade_idempotency_locking():
         request_mock = MagicMock()
         request_mock.headers = {"Idempotency-Key": "test-grading-lock-123"}
 
-        # Run first request (should succeed and save state)
-        res = await bulk_grade_submissions(payload=payload, request=request_mock, db=db_mock, current_user=user_mock)
+        res = await bulk_grade_submissions(
+            payload=payload,
+            background_tasks=background_tasks_mock,
+            request=request_mock,
+            db=db_mock,
+            current_user=user_mock,
+        )
 
         assert res.data["status"] == "RUNNING"
         assert res.data["submissions_queued"] == 1
@@ -109,7 +119,11 @@ async def test_bulk_grade_idempotency_locking():
 async def test_sse_progress_stream():
     """Verify that SSE stream yields valid progress payloads and disconnects cleanly."""
     db_mock = AsyncMock()
+
+    # school_id=None triggers the unconditional lookup path in check_run_access,
+    # bypassing the school isolation check entirely.
     user_mock = MagicMock(spec=User)
+    user_mock.school_id = None
 
     run_mock = MagicMock(spec=GradingRun)
     run_mock.id = uuid.uuid4()
@@ -118,22 +132,24 @@ async def test_sse_progress_stream():
     run_mock.graded_count = 5
     run_mock.failed_count = 1
 
-    # Return run mock on database query
+    # Both check_run_access AND the event loop query the same db.execute mock.
+    # We need at least two results: one for the access check, one for the event loop.
     result_mock = MagicMock()
-    result_mock.scalar_one_or_none.side_effect = [run_mock]
+    result_mock.scalar_one_or_none.return_value = run_mock
     db_mock.execute.return_value = result_mock
 
     # Generate events
-    response = await run_events_stream(run_id=str(run_mock.id), db=db_mock, current_user=user_mock)
-    
-    # We retrieve the generator from StreamingResponse
+    response = await run_events_stream(
+        run_id=str(run_mock.id), db=db_mock, current_user=user_mock
+    )
+
+    # Retrieve the async generator from StreamingResponse
     gen = response.body_iterator
 
     # First event check
     event1 = await gen.__anext__()
     assert "data:" in event1
-    
-    # Parse SSE text data
+
     json_str = event1.replace("data: ", "").strip()
     data = json.loads(json_str)
 
