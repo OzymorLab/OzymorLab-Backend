@@ -1,0 +1,36 @@
+name: Keep Render Backend Alive
+
+# Render free-tier services spin down after 15 minutes of inactivity.
+# This workflow pings the health endpoint every 14 minutes to prevent that.
+
+on:
+  schedule:
+    # Runs every 14 minutes — just inside Render's 15-minute spin-down window.
+    # Cron syntax: minute  hour  day  month  weekday
+    - cron: "*/14 * * * *"
+  # Allow manual trigger from the Actions tab for quick testing
+  workflow_dispatch:
+
+jobs:
+  ping:
+    name: Ping Backend Health Endpoint
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Wake up Render backend
+        run: |
+          echo "Pinging backend at $(date -u)"
+          STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --max-time 60 \
+            --retry 3 \
+            --retry-delay 5 \
+            "${{ secrets.RENDER_BACKEND_URL }}/api/v1/health")
+          echo "HTTP status: $STATUS"
+          if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
+            echo "Backend is alive."
+          else
+            echo "Warning: backend returned HTTP $STATUS — may still be warming up."
+            # Exit 0 so a slow cold-start doesn't fail the whole workflow
+            exit 0
+          fi
