@@ -663,8 +663,10 @@ async def bulk_grade_submissions(
     )
     submissions = sub_result.scalars().all()
 
+    # If no PARSED submissions at all, give a clear diagnostic error.
+    # If SOME are parsed and others are still PENDING/FAILED, proceed with
+    # the parsed ones and surface a warning — don't block the teacher.
     if not submissions:
-        # Check all statuses to give a clear error
         all_result = await db.execute(
             select(Submission).filter_by(task_id=task.id)
         )
@@ -672,40 +674,34 @@ async def bulk_grade_submissions(
 
         if not all_subs:
             raise HTTPException(
-                status_code=400, detail="No submissions found for this task. Upload answer sheets first.")
+                status_code=400,
+                detail="No submissions found for this task. Upload answer sheets first.",
+            )
 
-        status_counts = {}
+        status_counts: dict[str, int] = {}
         for s in all_subs:
             status_counts[s.status] = status_counts.get(s.status, 0) + 1
 
-        pending = status_counts.get("PENDING", 0)
-        parsing = status_counts.get("PARSING", 0)
-        failed = status_counts.get("FAILED", 0)
-
-        if pending > 0:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"{pending} submission(s) are stuck in PENDING — background processing may be slow or failed. "
-                    f"Check logs and re-trigger parsing. "
-                    f"Status breakdown: {status_counts}"
-                )
-            )
-        if parsing > 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{parsing} submission(s) are still being parsed. Wait for parsing to complete. Status breakdown: {status_counts}"
-            )
-        if failed > 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{failed} submission(s) failed during parsing. Re-upload or re-trigger parsing. Status breakdown: {status_counts}"
-            )
-
         raise HTTPException(
             status_code=400,
-            detail=f"No parsed submissions to grade. Current statuses: {status_counts}"
+            detail=(
+                f"No submissions are ready to grade yet. "
+                f"Status breakdown: {status_counts}. "
+                f"Wait for parsing to finish or use POST /submissions/retry-pending "
+                f"to re-queue stuck submissions."
+            ),
         )
+
+    # There are PARSED submissions — also count anything still in-flight so
+    # we can surface a warning in the response without blocking grading.
+    all_result = await db.execute(
+        select(Submission).filter_by(task_id=task.id)
+    )
+    all_subs = all_result.scalars().all()
+    skipped_counts: dict[str, int] = {}
+    for s in all_subs:
+        if s.status != "PARSED":
+            skipped_counts[s.status] = skipped_counts.get(s.status, 0) + 1
 
     # Create grading run
     model = settings.GEMINI_MODEL
@@ -737,13 +733,24 @@ async def bulk_grade_submissions(
 
     await db.commit()
 
+    # Build a human-readable warning if some submissions were skipped
+    warning = None
+    if skipped_counts:
+        parts = [f"{count} {status.lower()}" for status, count in skipped_counts.items()]
+        warning = (
+            f"Grading started for {len(submissions)} parsed submission(s). "
+            f"Skipped: {', '.join(parts)}. "
+            f"Use POST /submissions/retry-pending to re-queue stuck submissions."
+        )
+
     return ApiResponse(data={
         "run_id": str(run.id),
         "task_id": str(task.id),
         "status": "RUNNING",
         "submissions_queued": len(submissions),
+        "submissions_skipped": skipped_counts,
         "rubric_version": rubric.version,
-        "message": f"Grading started for {len(submissions)} submissions",
+        "message": warning or f"Grading started for {len(submissions)} submissions",
     })
 
 

@@ -97,14 +97,29 @@ async def start_run(run_id: str, db: AsyncSession = Depends(get_db), current_use
     if run.status != "CREATED":
         raise HTTPException(status_code=400, detail=f"Run already in status: {run.status}")
 
-    # Get all parsed submissions for this task
+    # Get all parsed submissions for this task — ignore PENDING/FAILED, grade what's ready
     sub_result = await db.execute(
         select(Submission).filter_by(task_id=run.task_id, status="PARSED")
     )
     submissions = sub_result.scalars().all()
 
     if not submissions:
-        raise HTTPException(status_code=400, detail="No parsed submissions to grade")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No parsed submissions to grade yet. "
+                "Wait for parsing to complete or use POST /submissions/retry-pending "
+                "to re-queue stuck submissions."
+            ),
+        )
+
+    # Count non-PARSED submissions for the warning
+    all_result = await db.execute(select(Submission).filter_by(task_id=run.task_id))
+    all_subs = all_result.scalars().all()
+    skipped_counts: dict[str, int] = {}
+    for s in all_subs:
+        if s.status != "PARSED":
+            skipped_counts[s.status] = skipped_counts.get(s.status, 0) + 1
 
     run.status = "RUNNING"
     run.total_submissions = len(submissions)
@@ -132,7 +147,15 @@ async def start_run(run_id: str, db: AsyncSession = Depends(get_db), current_use
         "run_id": run_id_str,
         "status": "RUNNING",
         "submissions_queued": len(submissions),
-        "message": f"Grading started for {len(submissions)} submissions",
+        "submissions_skipped": skipped_counts,
+        "message": (
+            f"Grading started for {len(submissions)} parsed submission(s). "
+            + (
+                f"Skipped {sum(skipped_counts.values())} submission(s) still in: "
+                f"{', '.join(f'{k}({v})' for k, v in skipped_counts.items())}."
+                if skipped_counts else ""
+            )
+        ).strip(),
     })
 
 
