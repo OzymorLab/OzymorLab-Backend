@@ -544,6 +544,122 @@ def parse_submission(
     return full_transcript, parsed_content
 
 
+class AnswerSheetState:
+    """Stateful tracker for contextual breadcrumbs in document parsing."""
+    
+    def __init__(self):
+        """Initialize with unknown context."""
+        self.section: str | None = None
+        self.question: str | None = None
+        self.subquestion: str | None = None
+    
+    def update_from_text(self, text: str) -> bool:
+        """
+        Update state based on text patterns.
+        Returns True if state was mutated, False otherwise.
+        """
+        initial_state = (self.section, self.question, self.subquestion)
+        
+        # Match section patterns: "Section A", "Part C", etc.
+        section_match = re.search(r'(?:Section|Part)\s+([A-Z])', text, re.IGNORECASE)
+        if section_match:
+            self.section = section_match.group(1)
+            self.question = None
+            self.subquestion = None
+            return initial_state != (self.section, self.question, self.subquestion)
+        
+        # Match question patterns: "Question 2", "Q2", etc.
+        question_match = re.search(r'(?:Question|Q\.?)\s*(\d+)', text, re.IGNORECASE)
+        if question_match:
+            self.question = question_match.group(1)
+            self.subquestion = None
+            return initial_state != (self.section, self.question, self.subquestion)
+        
+        # Match subquestion patterns: "(b)", "(ii)", etc.
+        subquestion_match = re.search(r'\(([a-z]|[ivx]+)\)', text, re.IGNORECASE)
+        if subquestion_match:
+            self.subquestion = subquestion_match.group(1).upper()
+            return initial_state != (self.section, self.question, self.subquestion)
+        
+        return False
+    
+    def get_state_string(self) -> str:
+        """Return formatted state string."""
+        if self.section is None:
+            return "Unknown Context"
+        
+        parts = [f"Sec {self.section}"]
+        if self.question is not None:
+            parts.append(f"Q{self.question}")
+            if self.subquestion is not None:
+                parts[-1] += f"({self.subquestion})"
+        
+        return " | ".join(parts)
+
+
+def segment_into_steps(raw_text: str) -> list[dict]:
+    """
+    Segment raw text into discrete structured steps with contexts.
+    Returns list of dicts with 'text' key.
+    """
+    # Split by common step markers, capturing the marker and following text
+    step_pattern = re.compile(
+        r'((?:^|\n)\s*(?:Step\s+\d+|Section\s+[A-Z]|Question\s+\d+|Part\s+[A-Z]|[0-9]+\.).*?)(?=(?:\n\s*(?:Step|Section|Question|Part|[0-9]+\.))|$)',
+        re.MULTILINE | re.IGNORECASE | re.DOTALL
+    )
+    
+    segments = []
+    
+    # First try to match structured patterns
+    matches = list(step_pattern.finditer(raw_text))
+    
+    if matches:
+        for match in matches:
+            text = match.group(0).strip()
+            if text:
+                segments.append({"text": text})
+    
+    # If no structured patterns found, split by newlines
+    if not segments:
+        lines = raw_text.split('\n')
+        current_segment = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped:
+                current_segment.append(stripped)
+            elif current_segment:
+                segments.append({"text": '\n'.join(current_segment)})
+                current_segment = []
+        
+        if current_segment:
+            segments.append({"text": '\n'.join(current_segment)})
+    
+    return segments if segments else [{"text": raw_text}]
+
+
+def classify_step_type(text: str) -> str:
+    """
+    Classify the type of step based on heuristic keyword matching.
+    Returns one of: "result", "derivation", "diagram", "statement"
+    """
+    text_lower = text.lower()
+    
+    # Check for result indicators
+    if any(word in text_lower for word in ["therefore", "hence", "thus", "answer is", "the answer"]):
+        return "result"
+    
+    # Check for derivation indicators
+    if any(word in text_lower for word in ["integrate", "derive", "differentiate", "apply", "using", "formula"]):
+        return "derivation"
+    
+    # Check for diagram indicators
+    if any(word in text_lower for word in ["figure", "diagram", "graph", "chart", "table", "refer"]):
+        return "diagram"
+    
+    # Default to statement
+    return "statement"
+
+
 def compute_parse_confidence(raw_text: str, steps: list[dict]) -> float:
     if not raw_text or not raw_text.strip():
         return 0.0
