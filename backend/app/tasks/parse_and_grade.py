@@ -2,16 +2,6 @@
 parse_and_grade — end-to-end pipeline for a single answer sheet.
 
 Upload → Parse → Grade, completely independent per submission.
-No manual "start grading" button required.
-
-Flow:
-  1. Download file from S3 and parse it (OCR + step segmentation).
-  2. Look up the task's active, APPROVED rubric.
-  3. If one exists → create a single-submission GradingRun and grade immediately.
-  4. If no approved rubric → leave submission as PARSED so teacher can grade later.
-
-Every submission runs this pipeline in its own asyncio task, in its own DB
-session. One submission crashing or being slow has zero effect on others.
 """
 import asyncio
 import io
@@ -28,12 +18,12 @@ async def parse_and_grade(submission_id: str) -> None:
     Safe to call as a fire-and-forget asyncio task.
     """
     from app.db.session import async_session_factory
-    from app.db.models import Submission, TaskRubric, GradingRun, GradeResult, Task
-    from app.services.ingestion import download_file
+    from app.db.models import Submission, TaskRubric, GradingRun, GradeResult, Task, SubmissionStep
+    from app.services.ingestion import download_file, upload_file
     from app.services.parsing import parse_submission as _parse_sync
     from app.services.grading import grade_submission as _grade_sync
     from app.config import settings
-    from sqlalchemy import select
+    from sqlalchemy import select, delete
 
     sub_uuid = uuid.UUID(submission_id)
 
@@ -56,18 +46,36 @@ async def parse_and_grade(submission_id: str) -> None:
             await session.commit()
             logger.info(f"[P&G] {submission_id} → PARSING")
 
+            # Look up active approved rubric steps to help with Q&A alignment
+            rubric_result = await session.execute(
+                select(TaskRubric)
+                .filter_by(task_id=task_id, is_active=True, approval_status="APPROVED")
+                .order_by(TaskRubric.created_at.desc())
+                .limit(1)
+            )
+            rubric = rubric_result.scalar_one_or_none()
+            
+            questions = None
+            if rubric:
+                questions = list(rubric.rubric_json.get("steps", []))
+
             # All sync/blocking work offloaded to thread pool
             file_data = await asyncio.to_thread(download_file, file_key)
             raw_text, parsed_content = await asyncio.to_thread(
-                _parse_sync, file_data, file_type
+                _parse_sync, file_data, file_type, str(submission.id), questions
             )
 
-            # Diagram crop extraction (optional, non-fatal)
-            diagram_file_key = await asyncio.to_thread(
-                _extract_diagram_crop, file_data, file_type, submission_id
-            )
-            if diagram_file_key:
-                parsed_content["diagram_file_key"] = diagram_file_key
+            # Store the full transcript as an intermediate file
+            try:
+                await asyncio.to_thread(
+                    upload_file,
+                    raw_text.encode("utf-8"),
+                    "full_raw_transcript.txt",
+                    "text/plain",
+                    f"submissions/{submission.id}"
+                )
+            except Exception as e:
+                logger.warning(f"[P&G] Failed to save raw transcript intermediate file: {e}")
 
             submission.raw_text      = raw_text
             submission.parsed_content = parsed_content
@@ -97,12 +105,18 @@ async def parse_and_grade(submission_id: str) -> None:
     # ── PHASE 2: Auto-grade if approved rubric exists ─────────────────────────
     async with async_session_factory() as session:
         try:
-            # Re-fetch submission (fresh session)
+            # Re-fetch in a brand-new session to confirm PARSED is committed
             result = await session.execute(
                 select(Submission).filter_by(id=sub_uuid)
             )
             submission = result.scalar_one_or_none()
+
+            # Hard gate: only proceed if the DB confirms status is PARSED
             if not submission or submission.status != "PARSED":
+                logger.info(
+                    f"[P&G] {submission_id} not in PARSED state "
+                    f"(got '{getattr(submission, 'status', 'none')}') — skipping auto-grade"
+                )
                 return
 
             # Find active, APPROVED rubric for this task
@@ -139,7 +153,7 @@ async def parse_and_grade(submission_id: str) -> None:
                 total_submissions=1,
                 graded_count=0,
                 failed_count=0,
-                created_by=submission.student_id,   # best available, may be None
+                created_by=submission.student_id,
             )
             session.add(run)
             await session.flush()
@@ -171,6 +185,46 @@ async def parse_and_grade(submission_id: str) -> None:
                 None,           # no BYOK key
             )
 
+            # Save the generated LaTeX document as an intermediate file
+            try:
+                # We can generate LaTeX transcript with paired Q&A
+                from tests.debug_pdf import build_latex, pdf_to_images
+                # Try to import/build latex using details
+                # Retrieve questions and answer text
+                questions_list = list(rubric.rubric_json.get("steps", []))
+                answers_map = {str(s.get("step_num")): s.get("text", "") for s in submission.parsed_content.get("steps", [])}
+                
+                # Transform rubric steps to expected questions format for build_latex
+                latex_questions = [{"number": str(q.get("step_num")), "text": q.get("description")} for q in questions_list]
+                
+                # Minimal student info for build_latex
+                student_info_placeholder = {
+                    "subject": task.subject if task else "General",
+                    "name": "Student",
+                    "roll_number": "UNKNOWN",
+                    "class": task.grade_level if task else "Unknown",
+                    "section": "UNKNOWN",
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "school": "UNKNOWN",
+                    "max_marks": str(task.max_marks) if task else "100",
+                    "obtained_marks": str(result_data["grade"])
+                }
+                
+                latex_src = build_latex(student_info_placeholder, latex_questions, answers_map, raw_text)
+                
+                await asyncio.to_thread(
+                    upload_file,
+                    latex_src.encode("utf-8"),
+                    "transcript.tex",
+                    "application/x-latex",
+                    f"submissions/{submission.id}"
+                )
+                
+                # Store the key in parsed_content for API retrieval
+                submission.parsed_content["latex_transcript_key"] = f"submissions/{submission.id}/transcript.tex"
+            except Exception as e:
+                logger.warning(f"[P&G] LaTeX transcript generation failed: {e}")
+
             # Persist GradeResult
             grade_result = GradeResult(
                 id=uuid.uuid4(),
@@ -191,6 +245,44 @@ async def parse_and_grade(submission_id: str) -> None:
                 flagged_components=result_data.get("flagged_components"),
             )
             session.add(grade_result)
+
+            # Persist individual answer steps in the SubmissionStep database table
+            await session.execute(
+                delete(SubmissionStep).filter_by(submission_id=submission.id)
+            )
+
+            for sg in result_data["step_grades"]:
+                s_num = sg["step_num"]
+                p_step = next((s for s in submission.parsed_content.get("steps", []) if s.get("step_num") == s_num), None)
+                
+                step_text = ""
+                step_latex = ""
+                bbox_data = None
+                
+                if p_step:
+                    step_text = p_step.get("text", "")
+                    step_latex = ", ".join(p_step.get("equations", []))
+                    diagrams = p_step.get("diagrams", [])
+                    if diagrams:
+                        bbox_data = {
+                            "diagram_key": diagrams[0].get("key"),
+                            "diagram_filename": diagrams[0].get("filename"),
+                            "box": diagrams[0].get("box")
+                        }
+
+                sub_step = SubmissionStep(
+                    submission_id=submission.id,
+                    step_num=s_num,
+                    step_type=sg.get("step_type") or (p_step.get("step_type") if p_step else "statement"),
+                    text=step_text,
+                    latex=step_latex,
+                    marks_awarded=sg["marks_awarded"],
+                    max_marks=sg["max_marks"],
+                    justification=sg["justification"],
+                    error_type=sg["error_type"],
+                    bounding_box=bbox_data
+                )
+                session.add(sub_step)
 
             if result_data.get("question_decomposition"):
                 submission.question_decomposition = result_data["question_decomposition"]
@@ -221,32 +313,3 @@ async def parse_and_grade(submission_id: str) -> None:
                     await session.commit()
             except Exception:
                 await session.rollback()
-
-
-def _extract_diagram_crop(
-    file_data: bytes, file_type: str, submission_id: str
-) -> str | None:
-    """
-    Sync helper: render the first PDF page as PNG and upload to S3.
-    Returns the S3 key or None on failure. Runs in a thread pool.
-    """
-    if file_type.lower() != "pdf":
-        return None
-    try:
-        import fitz
-        from app.services.ingestion import upload_file_obj
-
-        doc = fitz.open(stream=file_data, filetype="pdf")
-        if len(doc) == 0:
-            doc.close()
-            return None
-        page = doc[0]
-        pix  = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-        img_bytes = pix.tobytes("png")
-        doc.close()
-
-        key = upload_file_obj(io.BytesIO(img_bytes), f"diagram_crops/{submission_id}.png")
-        return key
-    except Exception as e:
-        logger.warning(f"[P&G] Diagram crop failed for {submission_id}: {e}")
-        return None

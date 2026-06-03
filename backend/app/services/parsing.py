@@ -1,327 +1,564 @@
 """
-Parsing service — 3-pass document parsing pipeline.
-
-Pass 1: Text extraction (PyMuPDF for PDF, Tesseract for images)
-Pass 2: Step segmentation (regex + heuristics)
-Pass 3: Equation extraction (LaTeX detection + SymPy validation)
+Parsing service — page-by-page OCR, diagram cropping, and question alignment.
 """
 import io
 import re
 import logging
-
 import fitz  # PyMuPDF
-from app.services.llm_client import extract_text_from_image_gemini
 
 logger = logging.getLogger(__name__)
 
+# ─── OCR & DIAGRAM EXTRACTION ──────────────────────────────────────────────────
 
-def extract_text_from_pdf(file_data: bytes) -> str:
-    """
-    Extract text from a PDF file using PyMuPDF.
-    Fast (~50ms per page) for digital/typed PDFs.
+OCR_PROMPT = """
+You are an expert OCR engine for exam answer sheets covering ANY subject
+(Mathematics, Physics, Chemistry, Biology, History, Geography, Economics, etc.).
 
-    For scanned PDFs (pages with no extractable text), renders the page
-    as an image and falls back to Gemini Vision OCR for transcription.
-    """
-    text_parts = []
+Your ONLY job is faithful transcription — never solve, simplify, or explain.
+
+══════════════════════════════════════════════════
+GENERAL RULES
+══════════════════════════════════════════════════
+1. Preserve question numbering exactly as written.
+2. Preserve line breaks and paragraph structure.
+3. Preserve all written content verbatim (spelling mistakes included).
+4. Output clean UTF-8 text with LaTeX math where needed.
+
+══════════════════════════════════════════════════
+MATHEMATICS & SCIENCE NOTATION
+══════════════════════════════════════════════════
+Convert all mathematical/chemical/physical expressions to LaTeX:
+
+• Limits            →  $$\\lim_{x\\to 0} f(x)$$
+• Fractions         →  $$\\frac{a}{b}$$
+• Roots             →  $$\\sqrt{x}$$,  $$\\sqrt[3]{x}$$
+• Powers            →  $$x^{2}$$
+• Integrals         →  $$\\int_{a}^{b} f(x)\\,dx$$
+• Derivatives       →  $$\\frac{d}{dx}$$,  $$\\frac{\\partial f}{\\partial x}$$
+• Trig/log          →  $$\\sin x$$,  $$\\ln x$$,  $$\\log_{10} x$$
+• Vectors           →  $$\\vec{F} = m\\vec{a}$$
+• Chemical eqns     →  Use \\ce{} notation: \\ce{H2O},  \\ce{CO2 + H2O -> H2CO3}
+• Physics units     →  $$9.8\\,\\text{m/s}^2$$
+• Matrices          →  Use pmatrix / bmatrix environments
+
+══════════════════════════════════════════════════
+DIAGRAMS, GRAPHS, FIGURES & TABLES
+══════════════════════════════════════════════════
+When you detect a hand-drawn diagram, graph, biological drawing, map, circuit,
+flow-chart, table, or any non-text visual element:
+
+1. Insert this EXACT placeholder (one per distinct visual):
+   [DIAGRAM_START]
+   TYPE: <one of: graph | biological_diagram | circuit | flowchart | map | table | other>
+   DESCRIPTION: <brief factual description of what is drawn, e.g.
+                 "Bell-shaped curve labelled 'Normal Distribution', x-axis 'Score',
+                  y-axis 'Frequency'">
+   LABELS: <comma-separated list of all text labels visible inside the figure>
+   LATEX_REPRESENTATION: <if a table → full LaTeX tabular; if a simple graph →
+                           TikZ skeleton or pgfplots skeleton; otherwise leave blank>
+   [DIAGRAM_END]
+
+2. Continue transcribing the surrounding text normally.
+
+══════════════════════════════════════════════════
+UNREADABLE CONTENT
+══════════════════════════════════════════════════
+• Single unreadable word  →  [UNCLEAR]
+• Unreadable sentence     →  [UNCLEAR_SENTENCE]
+• Completely blank answer →  [BLANK]
+
+NEVER guess unreadable handwriting.
+
+══════════════════════════════════════════════════
+OUTPUT FORMAT
+══════════════════════════════════════════════════
+Return only the transcribed text. No commentary, no preamble.
+"""
+
+def _render_page_to_png(page: fitz.Page, scale: float = 2.0) -> bytes:
+    """Render a fitz page at `scale`x resolution and return PNG bytes."""
+    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+    return pix.tobytes("png")
+
+
+def _ocr_page_single(image_bytes: bytes, page_num: int) -> str:
+    """Run OCR on a single page image using Gemini Client."""
+    from app.services.llm_client import get_client
+    from app.config import settings
+    from google.genai import types as genai_types
+
+    client = get_client()
     try:
-        doc = fitz.open(stream=file_data, filetype="pdf")
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            text = page.get_text("text")
-            if text.strip():
-                text_parts.append(text)
-            else:
-                # ── Scanned PDF fallback: render page as image → Gemini Vision OCR ──
-                logger.info(
-                    f"Page {page_num + 1} has no extractable text. "
-                    f"Rendering as image for Gemini Vision OCR fallback."
-                )
-                try:
-                    # Render page at 2x resolution for better OCR accuracy
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                    image_bytes = pix.tobytes("png")
-                    ocr_text = extract_text_from_image_gemini(image_bytes)
-                    if ocr_text and ocr_text.strip():
-                        text_parts.append(ocr_text)
-                        logger.info(
-                            f"Page {page_num + 1} OCR fallback extracted "
-                            f"{len(ocr_text)} characters."
-                        )
-                    else:
-                        logger.warning(
-                            f"Page {page_num + 1} OCR fallback returned empty text."
-                        )
-                except Exception as ocr_err:
-                    logger.error(
-                        f"Gemini Vision OCR fallback failed for page {page_num + 1}: {ocr_err}"
-                    )
-        doc.close()
+        response = client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=[
+                genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                OCR_PROMPT,
+            ],
+            config=genai_types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=4096,
+            ),
+        )
+        return response.text or ""
     except Exception as e:
-        logger.error(f"PDF text extraction failed: {e}")
-        raise
-
-    return "\n\n".join(text_parts)
+        logger.error(f"[OCR] Page {page_num} Gemini call failed: {e}")
+        return ""
 
 
-def extract_text_from_image(file_data: bytes) -> str:
+def detect_diagram_boxes(image_bytes: bytes, mime_type: str) -> list[dict]:
     """
-    Extract text from an image using Gemini 2.5 Pro Vision.
-    Extremely accurate for handwritten math and fuzzy scans.
+    Call Gemini to detect diagrams, tables, flowcharts and return their normalized
+    bounding boxes [ymin, xmin, ymax, xmax] in the range 0 to 1000.
     """
+    from app.services.llm_client import get_client, parse_json_response
+    from app.config import settings
+    from google.genai import types as genai_types
+
+    prompt = """
+    Identify all diagrams, hand-drawn figures, drawings, graphs, tables, maps, circuits, or flowcharts on this page.
+    For each detected diagram/element, return its bounding box as normalized coordinates [ymin, xmin, ymax, xmax] in the range 0 to 1000.
+    Return ONLY a valid JSON list of objects, with keys "type" and "box_2d". Example:
+    [
+      {"type": "biological_diagram", "box_2d": [100, 200, 500, 800]}
+    ]
+    """
+    client = get_client()
     try:
-        # Run Gemini Vision OCR
-        text = extract_text_from_image_gemini(file_data)
-        return text
+        response = client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=[
+                genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                prompt,
+            ],
+            config=genai_types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=1024,
+            ),
+        )
+        raw_text = response.text or ""
+        parsed = parse_json_response(raw_text)
+        if isinstance(parsed, list):
+            return parsed
+        return []
     except Exception as e:
-        logger.error(f"Image OCR failed: {e}")
-        raise
+        logger.error(f"[Parse] Diagram detection failed: {e}")
+        return []
 
+
+def crop_diagram(image_bytes: bytes, box_2d: list[int]) -> bytes:
+    """
+    Crop the image bytes using the normalized box coordinates [ymin, xmin, ymax, xmax] (0 to 1000).
+    Returns cropped PNG bytes.
+    """
+    from PIL import Image
+    import io
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        width, height = img.size
+        ymin, xmin, ymax, xmax = box_2d
+
+        left = int(xmin * width / 1000)
+        top = int(ymin * height / 1000)
+        right = int(xmax * width / 1000)
+        bottom = int(ymax * height / 1000)
+
+        # Add a tiny margin
+        margin = 15
+        left = max(0, left - margin)
+        top = max(0, top - margin)
+        right = min(width, right + margin)
+        bottom = min(height, bottom + margin)
+
+        cropped_img = img.crop((left, top, right, bottom))
+        out_bytes = io.BytesIO()
+        cropped_img.save(out_bytes, format="PNG")
+        return out_bytes.getvalue()
+    except Exception as e:
+        logger.error(f"[Parse] Cropping diagram failed: {e}")
+        return b""
+
+
+def process_page_diagrams(
+    ocr_text: str,
+    page_img_bytes: bytes,
+    page_num: int,
+    folder_id: str,
+) -> tuple[str, list[dict]]:
+    r"""
+    Detect diagrams on the page, crop them, upload to Supabase, and replace
+    [DIAGRAM_START]...[DIAGRAM_END] placeholders with LaTeX \includegraphics blocks.
+    Returns (processed_ocr_text, list_of_cropped_diagram_info).
+    """
+    from app.services.ingestion import upload_file
+
+    # 1. Detect diagram bounding boxes
+    boxes = detect_diagram_boxes(page_img_bytes, "image/png")
+    logger.info(f"[Parse] Page {page_num}: Detected {len(boxes)} visual box(es)")
+
+    cropped_diagrams = []
+    for idx, box_info in enumerate(boxes):
+        box = box_info.get("box_2d")
+        dtype = box_info.get("type", "diagram")
+        if not box or len(box) != 4:
+            continue
+
+        # Crop the image
+        cropped_bytes = crop_diagram(page_img_bytes, box)
+        if not cropped_bytes:
+            continue
+
+        # Upload to Supabase Storage
+        filename = f"diagram_{page_num}_{idx}.png"
+        folder = f"submissions/{folder_id}"
+        try:
+            key = upload_file(cropped_bytes, filename, "image/png", folder=folder)
+            cropped_diagrams.append({
+                "type": dtype,
+                "box": box,
+                "key": key,
+                "filename": filename
+            })
+            logger.info(f"[Parse] Cropped diagram uploaded: {key}")
+        except Exception as e:
+            logger.error(f"[Parse] Failed to upload cropped diagram {filename}: {e}")
+
+    # 2. Match text blocks to cropped diagrams
+    pattern = re.compile(r'\[DIAGRAM_START\](.*?)\[DIAGRAM_END\]', re.DOTALL | re.IGNORECASE)
+    block_counter = [0]
+
+    def replace_block(match: re.Match) -> str:
+        idx = block_counter[0]
+        block_counter[0] += 1
+
+        block_content = match.group(1).strip()
+        fields: dict[str, str] = {}
+        for line in block_content.splitlines():
+            if ':' in line:
+                key, _, val = line.partition(':')
+                fields[key.strip().upper()] = val.strip()
+
+        dtype = fields.get("TYPE", "other")
+        desc = fields.get("DESCRIPTION", "")
+        labels = fields.get("LABELS", "")
+
+        # If we have a matching cropped diagram
+        if idx < len(cropped_diagrams):
+            diag = cropped_diagrams[idx]
+            # Use diagram S3 key reference inside LaTeX
+            latex_block = f"""
+\\begin{{figure}}[H]
+\\centering
+\\includegraphics[width=0.8\\textwidth]{{{diag['key']}}}
+\\caption{{{desc} (Labels: {labels})}}
+\\end{{figure}}
+"""
+        else:
+            # Fallback placeholder
+            latex_block = f"""
+\\begin{{figure}}[H]
+\\centering
+\\fbox{{\\parbox{{0.8\\textwidth}}{{
+  \\textbf{{[Hand-drawn {dtype}]}}\\\\
+  \\textit{{{desc}}}\\\\
+  \\textbf{{Labels:}} {labels}
+}}}}
+\\caption{{{desc}}}
+\\end{{figure}}
+"""
+        return latex_block.strip()
+
+    processed_text = pattern.sub(replace_block, ocr_text)
+    return processed_text, cropped_diagrams
+
+
+# ─── Heuristic & LLM Question-Answer Alignment ─────────────────────────────
+
+def parse_answers_fallback(full_transcript: str) -> dict[str, str]:
+    """
+    Heuristic: find lines like "1.", "Q1", "1)", "(1)" etc. and group
+    following text as that question's answer.
+    Returns {question_number_str: answer_text}.
+    """
+    q_pattern = re.compile(
+        r'^(?:Q\.?\s*|Ans\.?\s*|Answer\.?\s*)?'
+        r'(\d+(?:[a-z](?:\([ivx]+\))?)?)'
+        r'[.)\]:\s]',
+        re.IGNORECASE | re.MULTILINE
+    )
+
+    matches = list(q_pattern.finditer(full_transcript))
+    answers: dict[str, str] = {}
+
+    for i, m in enumerate(matches):
+        num = m.group(1).strip()
+        start = m.end()
+        end   = matches[i+1].start() if i+1 < len(matches) else len(full_transcript)
+        body  = full_transcript[start:end].strip()
+        # Normalise number: "01" → "1"
+        try:
+            num_norm = str(int(re.sub(r'[a-z].*', '', num)))
+            suffix   = re.sub(r'^\d+', '', num)
+            num = num_norm + suffix
+        except ValueError:
+            pass
+        answers[num] = body
+
+    return answers
+
+
+def align_answers_to_questions(
+    full_transcript: str,
+    questions: list[dict],
+) -> dict[str, str]:
+    """
+    Call Gemini to align student answer blocks from the transcript to the
+    list of questions from the task rubric.
+    """
+    from app.services.llm_client import get_client, parse_json_response
+    from app.config import settings
+    from google.genai import types as genai_types
+
+    if not questions:
+        return {}
+
+    questions_list_str = "\n".join(
+        f"- Question/Step {q.get('step_num')}: {q.get('description')} (Max Marks: {q.get('marks')})"
+        for q in questions
+    )
+
+    prompt = f"""
+    You are given:
+    1. A list of exam questions/rubric steps:
+    {questions_list_str}
+
+    2. The full transcript of a student's answer sheet:
+    \"\"\"
+    {full_transcript}
+    \"\"\"
+
+    Your task is to map each question to the student's corresponding answer from the transcript.
+    Extract the answer text verbatim from the transcript, including any LaTeX equations and diagram figure/caption placeholders.
+    Do not add any comments or grade/solve the question. Just extract the student's written answer.
+    If a question was not answered, map it to an empty string "".
+
+    Return ONLY a JSON object mapping the question/step number (as a string) to the student's answer block.
+    No other text, no markdown code fences. Example:
+    {{
+      "1": "First answer...",
+      "2": "Second answer..."
+    }}
+    """
+
+    client = get_client()
+    try:
+        response = client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=[prompt],
+            config=genai_types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=4096,
+            ),
+        )
+        raw_text = response.text or ""
+        parsed = parse_json_response(raw_text)
+        if isinstance(parsed, dict):
+            return {str(k): str(v) for k, v in parsed.items()}
+        return {}
+    except Exception as e:
+        logger.error(f"[Parse] LLM alignment failed: {e}")
+        return parse_answers_fallback(full_transcript)
+
+
+# ─── Main parse entry point ───────────────────────────────────────────────────
 
 def extract_text(file_data: bytes, file_type: str) -> str:
-    """
-    Route to the appropriate text extraction method based on file type.
-    """
+    """Route to the appropriate text extraction method based on file type."""
     if file_type == "pdf":
         return extract_text_from_pdf(file_data)
-    elif file_type in ("png", "jpg", "jpeg"):
+    elif file_type in ("png", "jpg", "jpeg", "webp"):
         return extract_text_from_image(file_data)
     else:
         raise ValueError(f"Unsupported file type: {file_type}")
 
 
-# ── Step Segmentation ──
+def extract_text_from_pdf(file_data: bytes) -> str:
+    """Render PDF page-by-page and run OCR."""
+    doc = fitz.open(stream=file_data, filetype="pdf")
+    pages_text = []
+    for page_num in range(len(doc)):
+        img_bytes = _render_page_to_png(doc[page_num])
+        ocr_text = _ocr_page_single(img_bytes, page_num + 1)
+        pages_text.append(ocr_text)
+    doc.close()
+    return "\n\n".join(pages_text)
 
-# Patterns that indicate step boundaries
-STEP_PATTERNS = [
-    re.compile(r"^(?:step|Step|STEP)\s*(\d+)[:\.\)\-]?\s*", re.MULTILINE),
-    re.compile(r"^(\d+)[:\.\)]\s+", re.MULTILINE),
-    re.compile(r"^(?:Given|Find|Solution|Proof|Derivation|Answer)[:\s]", re.MULTILINE | re.IGNORECASE),
-    re.compile(r"^(?:Therefore|Hence|Thus|So|We know|Using|From|Since|Let)[,\s]", re.MULTILINE | re.IGNORECASE),
-]
 
-# Patterns for strict hierarchical question markers
-QUESTION_MARKERS = [
-    re.compile(r"^(?:section|part|group)\s*([a-z0-9])", re.IGNORECASE),
-    re.compile(r"^(?:ans|q|question|answer)?\s*(\d+)\s*(?:\(([a-z])\))?", re.IGNORECASE),
-    re.compile(r"^\(([a-zivx]+)\)", re.IGNORECASE),  # e.g., (b) or (ii)
-]
+def extract_text_from_image(file_data: bytes) -> str:
+    """OCR single image."""
+    return _ocr_page_single(file_data, 1)
 
-class AnswerSheetState:
-    """Tracks context across text blocks to resolve implicit breadcrumbs."""
-    def __init__(self, question_schema: dict | None = None):
-        self.current_section = None
-        self.current_question = None
-        self.current_subquestion = None
-        self.schema = question_schema or {}
 
-    def update_from_text(self, text: str) -> bool:
-        """Parse text for markers and update state. Returns True if state mutated."""
-        text_lower = text.strip().lower()
-        mutated = False
-        
-        # Check Section
-        sec_match = QUESTION_MARKERS[0].match(text_lower)
-        if sec_match:
-            self.current_section = sec_match.group(1).upper()
-            self.current_question = None
-            self.current_subquestion = None
-            mutated = True
-            
-        # Check Question (e.g. Q2, Ans 3, 4(a))
-        q_match = QUESTION_MARKERS[1].match(text_lower)
-        if q_match:
-            q_num = q_match.group(1)
-            sub_q = q_match.group(2)
-            if q_num:
-                self.current_question = q_num
-                self.current_subquestion = sub_q.upper() if sub_q else None
-                mutated = True
-                
-        # Check bare subquestion (e.g. (b))
-        sub_match = QUESTION_MARKERS[2].match(text_lower)
-        if sub_match and not q_match and self.current_question:
-            # Inherit current question!
-            self.current_subquestion = sub_match.group(1).upper()
-            mutated = True
-
-        return mutated
-
-    def get_state_string(self) -> str:
-        parts = []
-        if self.current_section: parts.append(f"Sec {self.current_section}")
-        if self.current_question:
-            q_str = f"Q{self.current_question}"
-            if self.current_subquestion: q_str += f"({self.current_subquestion})"
-            parts.append(q_str)
-        return " | ".join(parts) if parts else "Unknown Context"
-
-# Patterns for inline LaTeX detection
 LATEX_PATTERNS = [
-    re.compile(r"\$(.+?)\$"),  # inline $...$
-    re.compile(r"\\\((.+?)\\\)"),  # \(...\)
+    re.compile(r"\$(.+?)\$"),
+    re.compile(r"\\\((.+?)\\\)"),
     re.compile(r"\\begin\{equation\}(.+?)\\end\{equation\}", re.DOTALL),
-    # Common equation-like patterns (F = ma, E = mc^2, etc.)
     re.compile(r"([A-Za-z_]\w*)\s*=\s*([A-Za-z0-9_\+\-\*/\^\(\)\s\.\,]+)"),
 ]
 
-
-def segment_into_steps(raw_text: str, question_schema: dict | None = None) -> list[dict]:
-    """
-    Segment raw text into discrete answer steps using a Stateful Tracker.
-    """
-    if not raw_text or not raw_text.strip():
-        return []
-
-    lines = raw_text.strip().split("\n")
-    steps = []
-    current_step_lines = []
-    current_step_num = 0
-    state_tracker = AnswerSheetState(question_schema)
-
-    for line in lines:
-        line_stripped = line.strip()
-        if not line_stripped:
-            continue
-
-        # Check for context updates (Q1, Section A, etc.)
-        state_mutated = state_tracker.update_from_text(line_stripped)
-
-        # Check if this line starts a new logical step
-        is_new_step = False
-        for pattern in STEP_PATTERNS[:2]:  # Explicit step markers
-            if pattern.match(line_stripped):
-                is_new_step = True
-                break
-
-        # If context changed drastically, or explicitly new step
-        if (is_new_step or state_mutated) and current_step_lines:
-            current_step_num += 1
-            step_text = "\n".join(current_step_lines)
-            steps.append({
-                "step_num": current_step_num,
-                "text": step_text,
-                "equations": extract_equations(step_text),
-                "step_type": classify_step_type(step_text),
-                "context": state_tracker.get_state_string()
-            })
-            current_step_lines = [line_stripped]
-        else:
-            current_step_lines.append(line_stripped)
-
-    # Flush remaining
-    if current_step_lines:
-        current_step_num += 1
-        step_text = "\n".join(current_step_lines)
-        steps.append({
-            "step_num": current_step_num,
-            "text": step_text,
-            "equations": extract_equations(step_text),
-            "step_type": classify_step_type(step_text),
-            "context": state_tracker.get_state_string()
-        })
-
-    # If no boundaries detected
-    if len(steps) == 0 and raw_text.strip():
-        state_tracker.update_from_text(raw_text.strip())
-        steps.append({
-            "step_num": 1,
-            "text": raw_text.strip(),
-            "equations": extract_equations(raw_text),
-            "step_type": "statement",
-            "context": state_tracker.get_state_string()
-        })
-
-    return steps
-
-
 def extract_equations(text: str) -> list[str]:
-    """Extract LaTeX and equation-like expressions from text."""
-    equations = []
+    equations: list[str] = []
     for pattern in LATEX_PATTERNS:
         for match in pattern.finditer(text):
             expr = match.group(1) if match.lastindex else match.group(0)
             expr = expr.strip()
-            if len(expr) > 2 and expr not in equations:  # Skip trivially short matches
+            if len(expr) > 2 and expr not in equations:
                 equations.append(expr)
     return equations
 
 
-def classify_step_type(text: str) -> str:
-    """Classify a step as statement, derivation, result, or diagram."""
-    text_lower = text.lower()
+def parse_submission(
+    file_data: bytes,
+    file_type: str,
+    submission_id: str | None = None,
+    questions: list[dict] | None = None,
+) -> tuple[str, dict]:
+    """
+    Refactored page-by-page OCR, diagram extraction, and Q&A alignment pipeline.
+    """
+    import uuid
+    from app.services.ingestion import upload_file
 
-    if any(kw in text_lower for kw in ["therefore", "hence", "thus", "answer", "result", "final"]):
-        return "result"
-    elif any(kw in text_lower for kw in ["substitut", "differenti", "integrat", "simplif", "rearrang"]):
-        return "derivation"
-    elif any(kw in text_lower for kw in ["diagram", "figure", "sketch", "draw"]):
-        return "diagram"
-    elif "=" in text:
-        return "derivation"
+    folder_id = submission_id or str(uuid.uuid4())
+    page_images = []
+
+    # 1. Render/load pages
+    if file_type.lower() == "pdf":
+        doc = fitz.open(stream=file_data, filetype="pdf")
+        for i in range(len(doc)):
+            page_images.append(_render_page_to_png(doc[i]))
+        doc.close()
     else:
-        return "statement"
+        page_images.append(file_data)
 
+    logger.info(f"[Parse] Processing submission {folder_id} with {len(page_images)} page(s) page-by-page")
 
-def parse_submission(file_data: bytes, file_type: str) -> dict:
-    """
-    Full parsing pipeline: extract text → segment steps → extract equations.
+    # 2. OCR and diagram extraction page-by-page
+    pages_data = []
+    all_cropped_diagrams = []
+    full_transcript_parts = []
 
-    Returns the parsed_content JSONB structure.
-    """
-    # Pass 1: Text extraction
-    raw_text = extract_text(file_data, file_type)
+    for page_idx, img_bytes in enumerate(page_images):
+        page_num = page_idx + 1
+        logger.info(f"[Parse] Page {page_num}: transcribing & detecting diagrams")
 
-    # Pass 2: Step segmentation with Stateful Tracking
-    steps = segment_into_steps(raw_text)
+        # Upload page image as intermediate file
+        page_img_key = f"page_images/page_{page_num}.png"
+        try:
+            page_img_key = upload_file(img_bytes, f"page_{page_num}.png", "image/png", folder=f"submissions/{folder_id}")
+        except Exception as e:
+            logger.warning(f"[Parse] Page {page_num} image upload failed: {e}")
 
-    # Pass 3 is integrated into step segmentation (equation extraction per step)
+        # OCR transcription
+        ocr_text = _ocr_page_single(img_bytes, page_num)
 
-    # Compute parse confidence based on text quality
-    confidence = compute_parse_confidence(raw_text, steps)
+        # Save raw transcript as intermediate file
+        try:
+            upload_file(ocr_text.encode("utf-8"), f"raw_transcript_{page_num}.txt", "text/plain", folder=f"submissions/{folder_id}")
+        except Exception as e:
+            logger.warning(f"[Parse] Page {page_num} transcript upload failed: {e}")
 
-    # Map out context boundaries to ensure LLM grading sees context
-    has_orphaned_blocks = any(s.get("context") == "Unknown Context" for s in steps)
-    if has_orphaned_blocks:
-        logger.warning("Submission has orphaned text blocks lacking question mapping context. Tier 2 semantic fallback may be required.")
+        # Diagram detection and cropping
+        processed_ocr_text, page_diagrams = process_page_diagrams(ocr_text, img_bytes, page_num, folder_id)
+        all_cropped_diagrams.extend(page_diagrams)
+
+        pages_data.append({
+            "page_num": page_num,
+            "image_key": page_img_key,
+            "ocr_text": processed_ocr_text
+        })
+
+        full_transcript_parts.append(
+            f"\n\n{'='*60}\nPAGE {page_num}\n{'='*60}\n\n{processed_ocr_text}"
+        )
+
+    full_transcript = "\n\n".join(full_transcript_parts)
+
+    # 3. Align answers to questions
+    aligned_answers = {}
+    if questions:
+        logger.info(f"[Parse] Aligning transcript to {len(questions)} rubric question(s)")
+        aligned_answers = align_answers_to_questions(full_transcript, questions)
+    else:
+        logger.info("[Parse] No rubric questions provided, falling back to heuristic parsing")
+        aligned_answers = parse_answers_fallback(full_transcript)
+
+    # 4. Form steps matching the questions or parsed blocks
+    steps = []
+    # If questions provided, align with them
+    if questions:
+        for q in questions:
+            q_num_str = str(q.get("step_num"))
+            ans_text = aligned_answers.get(q_num_str, "")
+            
+            # Find diagrams used in this answer text
+            diagrams_in_step = []
+            for d in all_cropped_diagrams:
+                if d["key"] in ans_text:
+                    diagrams_in_step.append(d)
+
+            steps.append({
+                "step_num": q.get("step_num", 1),
+                "step_type": q.get("component_type", q.get("step_type", "statement")),
+                "text": ans_text,
+                "equations": extract_equations(ans_text),
+                "diagrams": diagrams_in_step,
+            })
+    else:
+        # Fallback step creation
+        for q_num_str, ans_text in aligned_answers.items():
+            try:
+                s_num = int(q_num_str)
+            except ValueError:
+                s_num = len(steps) + 1
+            steps.append({
+                "step_num": s_num,
+                "step_type": "statement",
+                "text": ans_text,
+                "equations": extract_equations(ans_text),
+                "diagrams": []
+            })
+
+    # 5. Compute parse confidence
+    confidence = compute_parse_confidence(full_transcript, steps)
 
     parsed_content = {
         "steps": steps,
         "detected_language": "english",
-        "has_diagrams": any(s["step_type"] == "diagram" for s in steps),
+        "has_diagrams": len(all_cropped_diagrams) > 0,
         "parse_confidence": confidence,
+        "pages": pages_data,
+        "cropped_diagrams": all_cropped_diagrams
     }
 
-    return raw_text, parsed_content
+    return full_transcript, parsed_content
 
 
 def compute_parse_confidence(raw_text: str, steps: list[dict]) -> float:
-    """
-    Estimate parsing confidence based on text quality indicators.
-    Returns a float between 0.0 and 1.0.
-    """
     if not raw_text or not raw_text.strip():
         return 0.0
-
-    score = 0.5  # base score
-
-    # More steps = more structure detected
+    score = 0.5
     if len(steps) >= 2:
         score += 0.1
     if len(steps) >= 4:
         score += 0.1
-
-    # Equations found = better parsing
-    total_equations = sum(len(s.get("equations", [])) for s in steps)
-    if total_equations > 0:
+    total_eq = sum(len(s.get("equations", [])) for s in steps)
+    if total_eq > 0:
         score += 0.15
-    if total_equations >= 3:
+    if total_eq >= 3:
         score += 0.05
-
-    # Longer text generally means better extraction
     if len(raw_text) > 100:
         score += 0.05
     if len(raw_text) > 500:
         score += 0.05
-
     return min(score, 1.0)

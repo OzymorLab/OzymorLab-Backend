@@ -1,6 +1,7 @@
 """
 Analysis HUD API — Unified queries, rosters, and contextual chat alignment.
 """
+import logging
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +18,8 @@ from app.services.auth_service import (
     check_submission_access
 )
 import uuid
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/analysis",
@@ -43,7 +46,9 @@ class StepDetailResponse(BaseModel):
     marks: float
     maxMarks: float
     errorType: Optional[str]
-    boundingBox: Optional[BoundingBox]
+    boundingBox: Optional[BoundingBox] = None
+    questionText: Optional[str] = None
+    diagramUrl: Optional[str] = None
 
 class SubmissionDetailResponse(BaseModel):
     id: str
@@ -418,9 +423,32 @@ async def get_submission_analysis_detail(
         else:
             avg_latency = "1.2s"
 
+    # Retrieve task rubric steps to map questionText
+    rubric_steps = []
+    if task and task.rubrics:
+        active_rubric = next((r for r in task.rubrics if r.is_active), None)
+        if active_rubric:
+            rubric_steps = active_rubric.rubric_json.get("steps", [])
+
+    rubric_map = {str(s.get("step_num")): s.get("description", "") for s in rubric_steps}
+
+    from app.services.ingestion import generate_presigned_url
+
     # Steps from submission_steps table
     steps_list = []
     for step in submission.steps:
+        s_num_str = str(step.step_num)
+        q_text = rubric_map.get(s_num_str, f"Question {s_num_str}")
+
+        diagram_url = None
+        bbox = step.bounding_box or {}
+        diagram_key = bbox.get("diagram_key")
+        if diagram_key:
+            try:
+                diagram_url = generate_presigned_url(diagram_key)
+            except Exception as e:
+                logger.warning(f"[Analysis] Failed to generate signed URL for {diagram_key}: {e}")
+
         steps_list.append({
             "stepNum": step.step_num,
             "type": step.step_type or "Calculation",
@@ -431,9 +459,11 @@ async def get_submission_analysis_detail(
             "marks": step.marks_awarded,
             "maxMarks": step.max_marks,
             "errorType": step.error_type,
-            "boundingBox": step.bounding_box
+            "boundingBox": step.bounding_box if (step.bounding_box and "x" in step.bounding_box) else None,
+            "questionText": q_text,
+            "diagramUrl": diagram_url
         })
-        
+
     payload = {
         "id": str(submission.id),
         "studentId": student_id,

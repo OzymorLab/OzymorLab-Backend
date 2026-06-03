@@ -1,11 +1,6 @@
 """
 Background task: parse a submission.
 Downloads file from S3 → extracts text → segments steps → updates DB.
-
-All sync/CPU-bound work (S3 download, PDF parsing, diagram crop upload) runs
-in a thread pool via asyncio.to_thread so it never blocks the event loop.
-This means multiple submissions can be parsed truly in parallel — one stuck
-upload cannot delay another.
 """
 import asyncio
 import io
@@ -20,11 +15,8 @@ logger = logging.getLogger(__name__)
 async def parse(submission_id: str):
     """
     Parse a submission: download from S3, extract text, segment steps.
-    Updates the submission record in the database.
-    Each step that is sync/CPU-bound is offloaded to a thread pool so the
-    async event loop is never blocked.
     """
-    from app.db.models import Submission
+    from app.db.models import Submission, TaskRubric
     from sqlalchemy import select
 
     async with async_session_factory() as session:
@@ -39,6 +31,7 @@ async def parse(submission_id: str):
 
             file_key = submission.file_key
             file_type = submission.file_type or "pdf"
+            task_id = submission.task_id
 
             # Mark as PARSING immediately
             submission.status = "PARSING"
@@ -49,23 +42,37 @@ async def parse(submission_id: str):
             from app.services.ingestion import download_file
             file_data: bytes = await asyncio.to_thread(download_file, file_key)
 
+            # Query active approved rubric steps to help with Q&A alignment
+            rubric_result = await session.execute(
+                select(TaskRubric)
+                .filter_by(task_id=task_id, is_active=True, approval_status="APPROVED")
+                .order_by(TaskRubric.created_at.desc())
+                .limit(1)
+            )
+            rubric = rubric_result.scalar_one_or_none()
+            
+            questions = None
+            if rubric:
+                questions = list(rubric.rubric_json.get("steps", []))
+
             # ── 2. Parse PDF/image (CPU-bound) ────────────────────────────────
             from app.services.parsing import parse_submission as _parse_sync
             raw_text, parsed_content = await asyncio.to_thread(
-                _parse_sync, file_data, file_type
+                _parse_sync, file_data, file_type, str(submission.id), questions
             )
 
-            # ── 3. Diagram crop extraction (CPU-bound + S3 upload) ────────────
-            diagram_file_key = None
-            if parsed_content.get("has_diagrams") and file_type.lower() == "pdf":
-                diagram_file_key = await asyncio.to_thread(
-                    _extract_and_upload_diagram_crop,
-                    file_data,
-                    submission_id,
+            # Upload the raw transcript as an intermediate file
+            from app.services.ingestion import upload_file
+            try:
+                await asyncio.to_thread(
+                    upload_file,
+                    raw_text.encode("utf-8"),
+                    "full_raw_transcript.txt",
+                    "text/plain",
+                    f"submissions/{submission.id}"
                 )
-
-            if diagram_file_key:
-                parsed_content["diagram_file_key"] = diagram_file_key
+            except Exception as e:
+                logger.warning(f"[Parse] Failed to save raw transcript intermediate file: {e}")
 
             # ── 4. Persist results ────────────────────────────────────────────
             submission.raw_text = raw_text
@@ -93,32 +100,3 @@ async def parse(submission_id: str):
                     await session.commit()
             except Exception:
                 await session.rollback()
-
-
-def _extract_and_upload_diagram_crop(file_data: bytes, submission_id: str) -> str | None:
-    """
-    Sync helper: render the first PDF page as PNG and upload to S3.
-    Runs inside a thread pool — safe to use sync libs here.
-    Returns the S3 key of the uploaded crop, or None on failure.
-    """
-    try:
-        import fitz
-        from app.services.ingestion import upload_file_obj
-
-        doc = fitz.open(stream=file_data, filetype="pdf")
-        if len(doc) == 0:
-            doc.close()
-            return None
-
-        page = doc[0]
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-        img_bytes = pix.tobytes("png")
-        doc.close()
-
-        img_file = io.BytesIO(img_bytes)
-        key = upload_file_obj(img_file, f"diagram_crops/{submission_id}.png")
-        logger.info(f"[Parse] Diagram crop uploaded: {key}")
-        return key
-    except Exception as e:
-        logger.error(f"[Parse] Diagram crop extraction failed for {submission_id}: {e}")
-        return None

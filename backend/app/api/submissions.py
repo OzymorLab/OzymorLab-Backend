@@ -576,7 +576,7 @@ async def _expire_and_requeue_stale(
     stale_result = await db.execute(
         select(Submission).filter(
             Submission.task_id == task_id,
-            Submission.status.in_(["PENDING", "PARSING"]),
+            Submission.status.in_(["PENDING", "PARSING", "GRADING"]),
             Submission.updated_at < cutoff,
         )
     )
@@ -585,10 +585,13 @@ async def _expire_and_requeue_stale(
     reset_counts: dict[str, int] = {}
     for sub in stale_subs:
         old_status = sub.status
-        sub.status = "PENDING"          # reset to PENDING so background task picks it up fresh
+        # GRADING-stuck → reset to PARSED so it can be re-graded
+        # PENDING/PARSING-stuck → reset to PENDING for a fresh parse attempt
+        sub.status = "PARSED" if old_status == "GRADING" else "PENDING"
         sub.error_message = f"Auto-reset: was stuck in {old_status} for >{_STALE_THRESHOLD_MINUTES}min"
         reset_counts[old_status] = reset_counts.get(old_status, 0) + 1
-        background_tasks.add_task(process_submission_background, str(sub.id))
+        if old_status != "GRADING":
+            background_tasks.add_task(process_submission_background, str(sub.id))
 
     if stale_subs:
         await db.flush()
@@ -651,16 +654,22 @@ async def bulk_grade_submissions(
     # so a re-triggered submission that finishes quickly can still be graded.
     reset_counts = await _expire_and_requeue_stale(task.id, db, background_tasks)
 
-    # Count parsed submissions
+    # Count parsed submissions — also treat GRADING as eligible so an
+    # auto-grade that didn't complete doesn't block manual bulk-grade
     sub_result = await db.execute(
-        select(Submission).filter_by(task_id=task.id, status="PARSED")
+        select(Submission).filter(
+            Submission.task_id == task.id,
+            Submission.status.in_(["PARSED", "GRADING"]),
+        )
     )
     submissions = sub_result.scalars().all()
+    # Only grade the ones fully PARSED — GRADING ones are already being handled
+    parsed_submissions = [s for s in submissions if s.status == "PARSED"]
 
     # If no PARSED submissions at all, give a clear diagnostic error.
     # If SOME are parsed and others are still PENDING/FAILED, proceed with
     # the parsed ones and surface a warning — don't block the teacher.
-    if not submissions:
+    if not parsed_submissions:
         all_result = await db.execute(
             select(Submission).filter_by(task_id=task.id)
         )
@@ -689,15 +698,14 @@ async def bulk_grade_submissions(
             ),
         )
 
-    # There are PARSED submissions — also count anything still in-flight so
-    # we can surface a warning in the response without blocking grading.
+    # Count non-PARSED submissions for the warning
     all_result = await db.execute(
         select(Submission).filter_by(task_id=task.id)
     )
     all_subs = all_result.scalars().all()
     skipped_counts: dict[str, int] = {}
     for s in all_subs:
-        if s.status != "PARSED":
+        if s.status not in ("PARSED", "GRADED"):
             skipped_counts[s.status] = skipped_counts.get(s.status, 0) + 1
 
     # Create grading run
@@ -707,9 +715,9 @@ async def bulk_grade_submissions(
         rubric_version=rubric.version,
         model=model,
         temperature=payload.temperature,
-        description=payload.description or f"Bulk grading - {len(submissions)} submissions",
+        description=payload.description or f"Bulk grading - {len(parsed_submissions)} submissions",
         status="RUNNING",
-        total_submissions=len(submissions),
+        total_submissions=len(parsed_submissions),
         graded_count=0,
         failed_count=0,
         created_by=current_user.id,
@@ -721,7 +729,7 @@ async def bulk_grade_submissions(
     # Grade each submission in background tasks
     from app.services.grading import grade_submission_background
 
-    for submission in submissions:
+    for submission in parsed_submissions:
         background_tasks.add_task(
             grade_submission_background,
             str(submission.id),
@@ -735,7 +743,7 @@ async def bulk_grade_submissions(
     if skipped_counts:
         parts = [f"{count} {status.lower()}" for status, count in skipped_counts.items()]
         warning = (
-            f"Grading started for {len(submissions)} parsed submission(s). "
+            f"Grading started for {len(parsed_submissions)} parsed submission(s). "
             f"Skipped: {', '.join(parts)}. "
             f"Use POST /submissions/retry-pending to re-queue stuck submissions."
         )
@@ -744,11 +752,11 @@ async def bulk_grade_submissions(
         "run_id": str(run.id),
         "task_id": str(task.id),
         "status": "RUNNING",
-        "submissions_queued": len(submissions),
+        "submissions_queued": len(parsed_submissions),
         "submissions_skipped": skipped_counts,
         "submissions_reset": reset_counts,
         "rubric_version": rubric.version,
-        "message": warning or f"Grading started for {len(submissions)} submissions",
+        "message": warning or f"Grading started for {len(parsed_submissions)} submissions",
     })
 
 
