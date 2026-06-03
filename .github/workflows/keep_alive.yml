@@ -21,16 +21,36 @@ jobs:
       - name: Wake up Render backend
         run: |
           echo "Pinging backend at $(date -u)"
+          
+          # Render backend URL for keep-alive pinging
+          BACKEND_URL="https://edeziav2.onrender.com"
+          HEALTH_URL="${BACKEND_URL}/api/v1/health"
+          echo "Health check URL: $HEALTH_URL"
+          
+          # Attempt to curl the health endpoint
           STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
             --max-time 60 \
             --retry 3 \
             --retry-delay 5 \
-            "${{ secrets.RENDER_BACKEND_URL }}/api/v1/health")
+            "$HEALTH_URL" 2>&1) || CURL_EXIT=$?
+          
+          # Check for curl errors
+          if [ -n "$CURL_EXIT" ] && [ "$CURL_EXIT" -ne 0 ]; then
+            echo "Warning: curl failed with exit code $CURL_EXIT (likely network timeout or connection refused)"
+            echo "This may indicate the backend is still starting up or unreachable"
+            # Don't fail the workflow for transient network issues
+            exit 0
+          fi
+          
           echo "HTTP status: $STATUS"
           if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
-            echo "Backend is alive."
+            echo "✓ Backend is alive and healthy"
+            exit 0
+          elif [ -z "$STATUS" ]; then
+            echo "Warning: No HTTP status received (possible network timeout)"
+            exit 0
           else
-            echo "Warning: backend returned HTTP $STATUS — may still be warming up."
-            # Exit 0 so a slow cold-start doesn't fail the whole workflow
+            echo "Warning: backend returned HTTP $STATUS — may still be warming up"
+            # Exit 0 so a slow cold-start doesn't fail the workflow
             exit 0
           fi
