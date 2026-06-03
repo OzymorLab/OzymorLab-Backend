@@ -100,7 +100,8 @@ async def start_run(run_id: str, db: AsyncSession = Depends(get_db), current_use
     # Expire stale PENDING/PARSING submissions and re-queue them before we
     # decide how many are PARSED — same logic as bulk-grade endpoint.
     from fastapi import BackgroundTasks as _BackgroundTasks
-    from app.api.submissions import _expire_and_requeue_stale    _bg = _BackgroundTasks()
+    from app.api.submissions import _expire_and_requeue_stale
+    _bg = _BackgroundTasks()
     reset_counts = await _expire_and_requeue_stale(run.task_id, db, _bg)
     # Fire re-queued parse tasks as asyncio tasks (BackgroundTasks not available here)
     for task_item in _bg.tasks:
