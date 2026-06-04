@@ -1,10 +1,10 @@
 """
 parse_and_grade — end-to-end pipeline for a single answer sheet.
 
-Upload → Parse → Grade, completely independent per submission.
+Phase 1: OCR + diagram crop + Q&A alignment → PARSED
+Phase 2: Grade against approved rubric → GRADED + SubmissionStep rows
 """
 import asyncio
-import io
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -12,18 +12,131 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 
+# ─── LaTeX transcript builder (inline — no debug_pdf import) ─────────────────
+
+def _esc(s: str) -> str:
+    """Minimal LaTeX escaping for plain text strings."""
+    for old, new in [
+        ("&", r"\&"), ("%", r"\%"), ("#", r"\#"),
+        ("_", r"\_"), ("{", r"\{"), ("}", r"\}"),
+        ("~", r"\textasciitilde{}"), ("^", r"\textasciicircum{}"),
+    ]:
+        s = s.replace(old, new)
+    return s
+
+
+def _build_latex_transcript(
+    student_info: dict,
+    rubric_steps: list,
+    answers_map: dict,          # step_num_str -> answer_text
+    step_grades: list,          # list of step_grade dicts from grading result
+    full_transcript: str,
+) -> str:
+    """Build a human-readable LaTeX transcript pairing questions with answers and scores."""
+    import re
+
+    TEMPLATE = r"""
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\geometry{margin=2.5cm}
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{%(subject)s}
+\lhead{Answer Sheet Transcript}
+\cfoot{\thepage}
+\begin{document}
+\begin{center}
+  {\LARGE\bfseries Answer Sheet Transcript}\\[6pt]
+  {\large\itshape %(subject)s}
+\end{center}
+\vspace{8pt}
+\begin{center}
+\begin{tabular}{|l|l||l|l|}
+\hline
+\textbf{Student} & %(name)s & \textbf{Roll No.} & %(roll)s \\
+\hline
+\textbf{Class} & %(cls)s & \textbf{Date} & %(date)s \\
+\hline
+\textbf{Max Marks} & %(max_marks)s & \textbf{Obtained} & %(obtained)s \\
+\hline
+\end{tabular}
+\end{center}
+\vspace{12pt}
+\hrule
+\vspace{12pt}
+%(qa_body)s
+\end{document}
+""".strip()
+
+    grade_map = {str(sg.get("step_num")): sg for sg in step_grades}
+
+    qa_lines = []
+    for r_step in rubric_steps:
+        sn = str(r_step.get("step_num", "?"))
+        q_text = r_step.get("description", "")
+        marks = r_step.get("marks", 0)
+        ans_text = answers_map.get(sn, "")
+        sg = grade_map.get(sn, {})
+        awarded = sg.get("marks_awarded", "—")
+        justification = sg.get("justification", "")
+
+        block = f"\\subsection*{{Question {sn}  [{marks} marks]}}\n"
+        block += f"\\noindent\\fbox{{\\begin{{minipage}}{{0.97\\textwidth}}\n"
+        block += f"\\textbf{{Q{sn}.}} {q_text}\n"
+        block += f"\\end{{minipage}}}}\n\n"
+        block += f"\\textbf{{Answer:}}\n\n"
+        block += (ans_text.strip() if ans_text.strip() else "\\textit{[No answer detected]}")
+        block += f"\n\n\\medskip\n"
+        block += f"\\textbf{{Score: }} {awarded} / {marks}"
+        if justification:
+            safe_j = justification.replace("%", r"\%").replace("&", r"\&")[:300]
+            block += f"\n\n\\textit{{\\small {safe_j}}}"
+        block += "\n\n\\bigskip\\hrule\\bigskip\n"
+        qa_lines.append(block)
+
+    if not qa_lines:
+        qa_lines = ["\\section*{Full Transcript}\n\n" + full_transcript]
+
+    return TEMPLATE % {
+        "subject":    _esc(student_info.get("subject", "Unknown")),
+        "name":       _esc(student_info.get("name", "Unknown")),
+        "roll":       _esc(student_info.get("roll_number", "—")),
+        "cls":        _esc(student_info.get("class", "—")),
+        "date":       _esc(student_info.get("date", "—")),
+        "max_marks":  _esc(str(student_info.get("max_marks", "—"))),
+        "obtained":   _esc(str(student_info.get("obtained_marks", "—"))),
+        "qa_body":    "\n".join(qa_lines),
+    }
+
+
+# ─── Main pipeline ────────────────────────────────────────────────────────────
+
 async def parse_and_grade(submission_id: str) -> None:
     """
     Full end-to-end pipeline for one answer sheet.
     Safe to call as a fire-and-forget asyncio task.
+
+    Phase 1 — OCR + diagram crop + alignment → PARSED
+    Phase 2 — Grade against approved rubric   → GRADED + SubmissionStep rows + LaTeX transcript
     """
     from app.db.session import async_session_factory
-    from app.db.models import Submission, TaskRubric, GradingRun, GradeResult, Task, SubmissionStep
+    from app.db.models import (
+        Submission, TaskRubric, GradingRun, GradeResult, Task, SubmissionStep
+    )
     from app.services.ingestion import download_file, upload_file
     from app.services.parsing import parse_submission as _parse_sync
     from app.services.grading import grade_submission as _grade_sync
     from app.config import settings
     from sqlalchemy import select, delete
+    from sqlalchemy.orm import attributes
 
     sub_uuid = uuid.UUID(submission_id)
 
@@ -46,18 +159,17 @@ async def parse_and_grade(submission_id: str) -> None:
             await session.commit()
             logger.info(f"[P&G] {submission_id} → PARSING")
 
-            # Look up active approved rubric steps to help with Q&A alignment
+            # Fetch rubric questions to guide alignment (any active rubric, approval not required yet)
             rubric_result = await session.execute(
                 select(TaskRubric)
-                .filter_by(task_id=task_id, is_active=True, approval_status="APPROVED")
+                .filter_by(task_id=task_id, is_active=True)
                 .order_by(TaskRubric.created_at.desc())
                 .limit(1)
             )
-            rubric = rubric_result.scalar_one_or_none()
-            
+            rubric_for_parse = rubric_result.scalar_one_or_none()
             questions = None
-            if rubric:
-                questions = list(rubric.rubric_json.get("steps", []))
+            if rubric_for_parse:
+                questions = list(rubric_for_parse.rubric_json.get("steps", []))
 
             # All sync/blocking work offloaded to thread pool
             file_data = await asyncio.to_thread(download_file, file_key)
@@ -65,19 +177,7 @@ async def parse_and_grade(submission_id: str) -> None:
                 _parse_sync, file_data, file_type, str(submission.id), questions
             )
 
-            # Store the full transcript as an intermediate file
-            try:
-                await asyncio.to_thread(
-                    upload_file,
-                    raw_text.encode("utf-8"),
-                    "full_raw_transcript.txt",
-                    "text/plain",
-                    f"submissions/{submission.id}"
-                )
-            except Exception as e:
-                logger.warning(f"[P&G] Failed to save raw transcript intermediate file: {e}")
-
-            submission.raw_text      = raw_text
+            submission.raw_text       = raw_text
             submission.parsed_content = parsed_content
             submission.status         = "PARSED"
             submission.error_message  = None
@@ -105,13 +205,11 @@ async def parse_and_grade(submission_id: str) -> None:
     # ── PHASE 2: Auto-grade if approved rubric exists ─────────────────────────
     async with async_session_factory() as session:
         try:
-            # Re-fetch in a brand-new session to confirm PARSED is committed
             result = await session.execute(
                 select(Submission).filter_by(id=sub_uuid)
             )
             submission = result.scalar_one_or_none()
 
-            # Hard gate: only proceed if the DB confirms status is PARSED
             if not submission or submission.status != "PARSED":
                 logger.info(
                     f"[P&G] {submission_id} not in PARSED state "
@@ -119,7 +217,7 @@ async def parse_and_grade(submission_id: str) -> None:
                 )
                 return
 
-            # Find active, APPROVED rubric for this task
+            # Need an APPROVED rubric to grade
             rubric_result = await session.execute(
                 select(TaskRubric)
                 .filter_by(task_id=task_id, is_active=True, approval_status="APPROVED")
@@ -130,25 +228,23 @@ async def parse_and_grade(submission_id: str) -> None:
 
             if not rubric:
                 logger.info(
-                    f"[P&G] {submission_id} parsed — no approved rubric yet, "
+                    f"[P&G] {submission_id} parsed — no APPROVED rubric yet, "
                     "leaving as PARSED for manual grading"
                 )
                 return
 
-            # Fetch task metadata for subject/board/grade_level
             task_result = await session.execute(
                 select(Task).filter_by(id=task_id)
             )
             task = task_result.scalar_one_or_none()
 
-            # Create a dedicated single-submission GradingRun
             run = GradingRun(
                 id=uuid.uuid4(),
                 task_id=task_id,
                 rubric_version=rubric.version,
                 model=settings.GEMINI_MODEL,
                 temperature=settings.GRADING_TEMPERATURE,
-                description=f"Auto-grade on upload",
+                description="Auto-grade on upload",
                 status="RUNNING",
                 total_submissions=1,
                 graded_count=0,
@@ -166,66 +262,110 @@ async def parse_and_grade(submission_id: str) -> None:
                 f"(run={run.id}, rubric_v{rubric.version})"
             )
 
-            # Build rubric data dict exactly as bulk-grade does
             rubric_data = dict(rubric.rubric_json)
             rubric_data["grading_notes"] = rubric.grading_notes or ""
             rubric_data["model"]         = settings.GEMINI_MODEL
+            rubric_data["max_marks"]     = float(task.max_marks) if task and task.max_marks else 0
 
-            # Run the grading pipeline in a thread (it's sync/LLM-bound)
             result_data = await asyncio.to_thread(
                 _grade_sync,
                 rubric_data,
                 submission.parsed_content,
                 settings.GRADING_TEMPERATURE,
-                task.subject    if task else "General",
-                task.board      if task else "Generic",
+                task.subject     if task else "General",
+                task.board       if task else "Generic",
                 task.grade_level if task else "Unknown",
                 submission.file_key,
                 str(submission.id),
-                None,           # no BYOK key
+                None,
             )
 
-            # Save the generated LaTeX document as an intermediate file
+            # ── Persist SubmissionStep rows ───────────────────────────────────
+            await session.execute(
+                delete(SubmissionStep).filter_by(submission_id=submission.id)
+            )
+
+            rubric_steps  = rubric_data.get("steps", [])
+            parsed_steps  = submission.parsed_content.get("steps", [])
+            # Build map by step_num for quick lookup
+            parsed_map    = {str(ps.get("step_num")): ps for ps in parsed_steps}
+
+            for sg in result_data["step_grades"]:
+                s_num_str = str(sg["step_num"])
+                p_step = parsed_map.get(s_num_str)
+
+                step_text  = p_step.get("text", "")           if p_step else ""
+                step_latex = p_step.get("latex") or p_step.get("text", "") if p_step else ""
+                bbox_data  = None
+                if p_step:
+                    diagrams = p_step.get("diagrams", [])
+                    if diagrams:
+                        bbox_data = {
+                            "diagram_key":      diagrams[0].get("key"),
+                            "diagram_filename": diagrams[0].get("filename"),
+                            "box":              diagrams[0].get("box"),
+                        }
+
+                r_step_meta = next(
+                    (r for r in rubric_steps if str(r.get("step_num")) == s_num_str), {}
+                )
+
+                session.add(SubmissionStep(
+                    submission_id=submission.id,
+                    step_num=sg["step_num"],
+                    step_type=(
+                        sg.get("step_type")
+                        or r_step_meta.get("component_type", "statement")
+                    ),
+                    text=step_text,
+                    latex=step_latex,
+                    marks_awarded=sg["marks_awarded"],
+                    max_marks=sg["max_marks"],
+                    justification=sg["justification"],
+                    error_type=sg.get("error_type"),
+                    bounding_box=bbox_data,
+                ))
+
+            # ── Build LaTeX transcript and store it ───────────────────────────
             try:
-                # We can generate LaTeX transcript with paired Q&A
-                from tests.debug_pdf import build_latex, pdf_to_images
-                # Try to import/build latex using details
-                # Retrieve questions and answer text
-                questions_list = list(rubric.rubric_json.get("steps", []))
-                answers_map = {str(s.get("step_num")): s.get("text", "") for s in submission.parsed_content.get("steps", [])}
-                
-                # Transform rubric steps to expected questions format for build_latex
-                latex_questions = [{"number": str(q.get("step_num")), "text": q.get("description")} for q in questions_list]
-                
-                # Minimal student info for build_latex
-                student_info_placeholder = {
-                    "subject": task.subject if task else "General",
-                    "name": "Student",
-                    "roll_number": "UNKNOWN",
-                    "class": task.grade_level if task else "Unknown",
-                    "section": "UNKNOWN",
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "school": "UNKNOWN",
-                    "max_marks": str(task.max_marks) if task else "100",
-                    "obtained_marks": str(result_data["grade"])
+                answers_map = {
+                    str(ps.get("step_num")): ps.get("text", "")
+                    for ps in parsed_steps
                 }
-                
-                latex_src = build_latex(student_info_placeholder, latex_questions, answers_map, raw_text)
-                
-                await asyncio.to_thread(
-                    upload_file,
+                student_info = {
+                    "subject":        task.subject     if task else "Unknown",
+                    "name":           str(submission.student_id or "Student"),
+                    "roll_number":    "—",
+                    "class":          task.grade_level if task else "—",
+                    "date":           datetime.now().strftime("%Y-%m-%d"),
+                    "max_marks":      str(task.max_marks) if task else "—",
+                    "obtained_marks": str(result_data["grade"]),
+                }
+                latex_src = _build_latex_transcript(
+                    student_info,
+                    rubric_steps,
+                    answers_map,
+                    result_data["step_grades"],
+                    submission.raw_text or "",
+                )
+                from app.services.ingestion import upload_file as _upload
+                latex_key = await asyncio.to_thread(
+                    _upload,
                     latex_src.encode("utf-8"),
                     "transcript.tex",
-                    "application/x-latex",
-                    f"submissions/{submission.id}"
+                    "text/x-latex",
+                    f"submissions/{submission.id}",
                 )
-                
-                # Store the key in parsed_content for API retrieval
-                submission.parsed_content["latex_transcript_key"] = f"submissions/{submission.id}/transcript.tex"
-            except Exception as e:
-                logger.warning(f"[P&G] LaTeX transcript generation failed: {e}")
+                # Store key — use flag_modified so SQLAlchemy detects JSONB mutation
+                new_pc = dict(submission.parsed_content)
+                new_pc["latex_transcript_key"] = latex_key
+                submission.parsed_content = new_pc
+                attributes.flag_modified(submission, "parsed_content")
+                logger.info(f"[P&G] LaTeX transcript stored: {latex_key}")
+            except Exception as latex_err:
+                logger.warning(f"[P&G] LaTeX transcript generation skipped: {latex_err}")
 
-            # Persist GradeResult
+            # ── Persist GradeResult ───────────────────────────────────────────
             grade_result = GradeResult(
                 id=uuid.uuid4(),
                 submission_id=submission.id,
@@ -246,51 +386,13 @@ async def parse_and_grade(submission_id: str) -> None:
             )
             session.add(grade_result)
 
-            # Persist individual answer steps in the SubmissionStep database table
-            await session.execute(
-                delete(SubmissionStep).filter_by(submission_id=submission.id)
-            )
-
-            for sg in result_data["step_grades"]:
-                s_num = sg["step_num"]
-                p_step = next((s for s in submission.parsed_content.get("steps", []) if s.get("step_num") == s_num), None)
-                
-                step_text = ""
-                step_latex = ""
-                bbox_data = None
-                
-                if p_step:
-                    step_text = p_step.get("text", "")
-                    step_latex = ", ".join(p_step.get("equations", []))
-                    diagrams = p_step.get("diagrams", [])
-                    if diagrams:
-                        bbox_data = {
-                            "diagram_key": diagrams[0].get("key"),
-                            "diagram_filename": diagrams[0].get("filename"),
-                            "box": diagrams[0].get("box")
-                        }
-
-                sub_step = SubmissionStep(
-                    submission_id=submission.id,
-                    step_num=s_num,
-                    step_type=sg.get("step_type") or (p_step.get("step_type") if p_step else "statement"),
-                    text=step_text,
-                    latex=step_latex,
-                    marks_awarded=sg["marks_awarded"],
-                    max_marks=sg["max_marks"],
-                    justification=sg["justification"],
-                    error_type=sg["error_type"],
-                    bounding_box=bbox_data
-                )
-                session.add(sub_step)
-
             if result_data.get("question_decomposition"):
                 submission.question_decomposition = result_data["question_decomposition"]
 
-            submission.status   = "GRADED"
-            run.status          = "COMPLETED"
-            run.graded_count    = 1
-            run.completed_at    = datetime.now(timezone.utc)
+            submission.status = "GRADED"
+            run.status        = "COMPLETED"
+            run.graded_count  = 1
+            run.completed_at  = datetime.now(timezone.utc)
             await session.commit()
 
             logger.info(

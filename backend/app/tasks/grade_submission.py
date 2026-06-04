@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from app.db.session import async_session_factory
 from app.config import settings
 from app.services.grading import grade_submission
+from sqlalchemy.orm import attributes
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +76,10 @@ async def grade(submission_id: str, grading_run_id: str):
             await session.commit()
 
             # Run the hybrid grading pipeline (sync, CPU-bound)
-            rubric_data = rubric_record.rubric_json
+            rubric_data = dict(rubric_record.rubric_json or {})
             rubric_data["grading_notes"] = rubric_record.grading_notes or ""
             rubric_data["model"] = run.model
+            rubric_data["max_marks"] = float(task.max_marks) if task and task.max_marks else 0
 
             result = grade_submission(
                 rubric=rubric_data,
@@ -90,6 +92,92 @@ async def grade(submission_id: str, grading_run_id: str):
                 submission_id=str(submission.id),
                 user_gemini_key=None,
             )
+
+            # ── Persist SubmissionStep rows (missing in original) ─────────────
+            from sqlalchemy import delete as sa_delete
+            from app.db.models import SubmissionStep
+            await session.execute(
+                sa_delete(SubmissionStep).filter_by(submission_id=submission.id)
+            )
+
+            rubric_steps = rubric_data.get("steps", [])
+            parsed_steps = (submission.parsed_content or {}).get("steps", [])
+            parsed_map   = {str(ps.get("step_num")): ps for ps in parsed_steps}
+
+            for sg in result.get("step_grades", []):
+                s_num_str = str(sg["step_num"])
+                p_step    = parsed_map.get(s_num_str)
+
+                step_text  = p_step.get("text", "")                if p_step else ""
+                step_latex = p_step.get("latex") or p_step.get("text", "") if p_step else ""
+                bbox_data  = None
+                if p_step:
+                    diagrams = p_step.get("diagrams", [])
+                    if diagrams:
+                        bbox_data = {
+                            "diagram_key":      diagrams[0].get("key"),
+                            "diagram_filename": diagrams[0].get("filename"),
+                            "box":              diagrams[0].get("box"),
+                        }
+
+                r_step_meta = next(
+                    (r for r in rubric_steps if str(r.get("step_num")) == s_num_str), {}
+                )
+
+                session.add(SubmissionStep(
+                    submission_id=submission.id,
+                    step_num=sg["step_num"],
+                    step_type=(
+                        sg.get("step_type")
+                        or r_step_meta.get("component_type", "statement")
+                    ),
+                    text=step_text,
+                    latex=step_latex,
+                    marks_awarded=sg["marks_awarded"],
+                    max_marks=sg["max_marks"],
+                    justification=sg["justification"],
+                    error_type=sg.get("error_type"),
+                    bounding_box=bbox_data,
+                ))
+
+            try:
+                from app.tasks.parse_and_grade import _build_latex_transcript
+                from app.services.ingestion import upload_file as _upload
+
+                parsed_steps = (submission.parsed_content or {}).get("steps", [])
+                answers_map = {
+                    str(ps.get("step_num")): ps.get("latex") or ps.get("text", "")
+                    for ps in parsed_steps
+                }
+                student_info = {
+                    "subject": task.subject if task else "Unknown",
+                    "name": str(submission.student_id or "Student"),
+                    "roll_number": "-",
+                    "class": task.grade_level if task else "-",
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "max_marks": str(task.max_marks) if task else "-",
+                    "obtained_marks": str(result["grade"]),
+                }
+                latex_src = _build_latex_transcript(
+                    student_info,
+                    rubric_steps,
+                    answers_map,
+                    result.get("step_grades", []),
+                    submission.raw_text or "",
+                )
+                latex_key = _upload(
+                    latex_src.encode("utf-8"),
+                    "transcript.tex",
+                    "text/x-latex",
+                    f"submissions/{submission.id}",
+                )
+                parsed_content = dict(submission.parsed_content or {})
+                parsed_content["latex_transcript_key"] = latex_key
+                submission.parsed_content = parsed_content
+                attributes.flag_modified(submission, "parsed_content")
+                logger.info("[Grade] LaTeX transcript stored for %s: %s", submission_id, latex_key)
+            except Exception as latex_err:
+                logger.warning("[Grade] LaTeX transcript generation skipped for %s: %s", submission_id, latex_err)
 
             # Store grade result
             grade_result = GradeResult(

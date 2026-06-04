@@ -116,8 +116,28 @@ def grade_submission(
     """
     start_time = time.time()
     
-    rubric_steps = rubric.get("steps", [])
+    rubric_steps = list(rubric.get("steps") or [])
     student_steps = parsed_content.get("steps", [])
+    qa_blocks = parsed_content.get("qa_blocks", [])
+
+    if not rubric_steps:
+        fallback_max = float(rubric.get("max_marks") or len(student_steps) or 1)
+        per_step_marks = fallback_max / max(len(student_steps), 1)
+        rubric_steps = [
+            {
+                "step_num": s.get("step_num", idx + 1),
+                "description": f"Question {s.get('step_num', idx + 1)}",
+                "marks": per_step_marks,
+                "marking_notes": rubric.get("grading_notes", "Evaluate against the extracted question and answer transcript."),
+                "component_type": s.get("step_type", "statement"),
+            }
+            for idx, s in enumerate(student_steps)
+        ]
+        logger.warning(
+            "[Grade] Rubric for submission %s had no steps; using %s parsed answer block(s) as fallback.",
+            submission_id,
+            len(rubric_steps),
+        )
     
     logger.info(f"[Grade] Grading submission {submission_id} question-by-question")
     
@@ -127,10 +147,12 @@ def grade_submission(
     
     component_totals = {}  # component_type -> {"awarded": 0.0, "max": 0.0}
 
-    # Map student steps by step_num for direct question lookup
+    # Map student steps by step_num for direct question lookup.
+    # Also keep an ordered list for positional fallback when step nums don't align.
     student_step_map = {str(s.get("step_num")): s for s in student_steps}
+    qa_block_map = {str(q.get("step_num")): q for q in qa_blocks}
 
-    for r_step in rubric_steps:
+    for r_idx, r_step in enumerate(rubric_steps):
         s_num = str(r_step.get("step_num"))
         q_text = r_step.get("description", "")
         max_marks = float(r_step.get("marks", 5.0))
@@ -140,11 +162,29 @@ def grade_submission(
         # Default fallback if student didn't answer
         student_ans = ""
         diagram_keys = []
+        qa_block = qa_block_map.get(s_num)
         
-        # Retrieve mapped student answer
+        # Retrieve mapped student answer — try exact step_num match first,
+        # then positional fallback (handles OCR step numbering mismatches)
         s_step = student_step_map.get(s_num)
-        if s_step:
-            student_ans = s_step.get("text", "")
+        if s_step is None and r_idx < len(student_steps):
+            s_step = student_steps[r_idx]
+            logger.info(
+                f"[Grade] step {s_num}: no exact match, "
+                f"using positional step {r_idx} (step_num={s_step.get('step_num')})"
+            )
+
+        if qa_block:
+            block_question = qa_block.get("question_text") or q_text
+            block_answer = qa_block.get("latex_answer") or qa_block.get("answer_text") or ""
+            student_ans = (
+                "Question and answer transcript block:\n"
+                f"Question: {block_question}\n\n"
+                f"Student answer, preserved as LaTeX/transcript:\n{block_answer}"
+            )
+            diagram_keys = [k for k in qa_block.get("diagram_keys", []) if k]
+        elif s_step:
+            student_ans = s_step.get("latex") or s_step.get("text", "")
             diagrams = s_step.get("diagrams", [])
             diagram_keys = [d["key"] for d in diagrams if "key" in d]
 

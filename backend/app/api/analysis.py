@@ -447,7 +447,7 @@ async def get_submission_analysis_detail(
             try:
                 diagram_url = generate_presigned_url(diagram_key)
             except Exception as e:
-                logger.warning(f"[Analysis] Failed to generate signed URL for {diagram_key}: {e}")
+                logger.warning(f"[Analysis] Diagram URL generation failed for step {s_num_str}")
 
         steps_list.append({
             "stepNum": step.step_num,
@@ -461,16 +461,25 @@ async def get_submission_analysis_detail(
             "errorType": step.error_type,
             "boundingBox": step.bounding_box if (step.bounding_box and "x" in step.bounding_box) else None,
             "questionText": q_text,
-            "diagramUrl": diagram_url
+            "diagramUrl": diagram_url,
         })
 
-    # Generate a presigned URL for the full handwritten answer sheet
+    # Presigned URL for the original handwritten sheet (no key exposure)
     sheet_url = None
     if submission.file_key and submission.file_key != "classroom-worksheet":
         try:
             sheet_url = generate_presigned_url(submission.file_key)
         except Exception as e:
-            logger.warning(f"[Analysis] Failed to generate signed URL for sheet {submission.file_key}: {e}")
+            logger.warning(f"[Analysis] Sheet URL generation failed for submission {submission_id}")
+
+    # Presigned URL for the LaTeX transcript (if generated)
+    latex_transcript_url = None
+    latex_key = (submission.parsed_content or {}).get("latex_transcript_key")
+    if latex_key:
+        try:
+            latex_transcript_url = generate_presigned_url(latex_key)
+        except Exception as e:
+            logger.warning(f"[Analysis] LaTeX transcript URL generation failed for submission {submission_id}")
 
     payload = {
         "id": str(submission.id),
@@ -485,13 +494,13 @@ async def get_submission_analysis_detail(
         "avgClassScore": avg_class_score,
         "avgLatency": avg_latency,
         "questionText": question_text,
-        "fileKey": submission.file_key,
         "fileType": submission.file_type or "pdf",
-        "sheetUrl": sheet_url,          # presigned URL for the original handwritten sheet
-        "rawText": submission.raw_text or "",   # full OCR transcript
-        "steps": steps_list
+        "sheetUrl": sheet_url,
+        "latexTranscriptUrl": latex_transcript_url,
+        "rawText": submission.raw_text or "",
+        "steps": steps_list,
     }
-    
+
     return ApiResponse(data=payload)
 
 
