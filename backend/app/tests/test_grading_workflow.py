@@ -78,6 +78,7 @@ async def test_bulk_grade_idempotency_locking():
     # Mock Submissions (parsed)
     sub_mock = MagicMock(spec=Submission)
     sub_mock.id = uuid.uuid4()
+    sub_mock.status = "PARSED"
 
     # Mock DB executions
     result_mock = MagicMock()
@@ -91,8 +92,10 @@ async def test_bulk_grade_idempotency_locking():
 
     background_tasks_mock = BackgroundTasks()
 
-    # Patch asyncio.create_task to avoid background grading running in tests
-    with patch("asyncio.create_task"):
+    # Patch asyncio.create_task to avoid background grading, and
+    # _expire_and_requeue_stale so it doesn't interfere with mocked DB returns
+    with patch("asyncio.create_task"), \
+         patch("app.api.submissions._expire_and_requeue_stale", return_value={}):
         payload = BulkGradeRequest(
             task_id=str(task_mock.id),
             description="Test bulk grade",
