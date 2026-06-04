@@ -464,6 +464,14 @@ async def get_submission_analysis_detail(
             "diagramUrl": diagram_url
         })
 
+    # Generate a presigned URL for the full handwritten answer sheet
+    sheet_url = None
+    if submission.file_key and submission.file_key != "classroom-worksheet":
+        try:
+            sheet_url = generate_presigned_url(submission.file_key)
+        except Exception as e:
+            logger.warning(f"[Analysis] Failed to generate signed URL for sheet {submission.file_key}: {e}")
+
     payload = {
         "id": str(submission.id),
         "studentId": student_id,
@@ -478,6 +486,9 @@ async def get_submission_analysis_detail(
         "avgLatency": avg_latency,
         "questionText": question_text,
         "fileKey": submission.file_key,
+        "fileType": submission.file_type or "pdf",
+        "sheetUrl": sheet_url,          # presigned URL for the original handwritten sheet
+        "rawText": submission.raw_text or "",   # full OCR transcript
         "steps": steps_list
     }
     
