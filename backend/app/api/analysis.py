@@ -1,6 +1,9 @@
 """
 Analysis HUD API — Unified queries, rosters, and contextual chat alignment.
 """
+import io
+import json
+import uuid
 import logging
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
@@ -17,7 +20,8 @@ from app.services.auth_service import (
     check_task_access,
     check_submission_access
 )
-import uuid
+from app.services.parsing import extract_text_from_pdf
+from app.services.llm_client import extract_text_from_image_gemini, call_gemini, parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -802,6 +806,7 @@ async def grade_practice_submission(
 ):
     """
     Grade a practice submission. Accepts file upload and rubric text.
+    Uses Gemini AI to extract text and grade against the rubric.
     Returns the graded practice attempt with steps and scores.
     
     Multipart form data:
@@ -809,123 +814,160 @@ async def grade_practice_submission(
     - rubric: Rubric text or rubric name to use for grading
     """
 
-    # Validate inputs
     if not file or not rubric:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Both file and rubric are required"
         )
 
-    # For now, we implement a mock version that stores the practice and returns sample graded results
-    # In production, this would:
-    # 1. Save file to S3
-    # 2. Call diagram-marker service for OCR/parsing
-    # 3. Grade using LLM with provided rubric
-    # 4. Store structured results
+    file_bytes = await file.read()
 
+    # Extract text from uploaded file
+    extracted_text = ""
+    file_ext = (file.filename or "").lower()
+    try:
+        if file_ext.endswith(".pdf"):
+            extracted_text = extract_text_from_pdf(file_bytes)
+        else:
+            extracted_text = extract_text_from_image_gemini(file_bytes)
+    except Exception as e:
+        logger.error(f"Text extraction failed for practice: {e}")
+        extracted_text = "[Text extraction failed — grading based on filename only]"
+
+    raw_text = extracted_text or "[No extractable text found]"
+
+    # Build AI grading prompt
+    grade_prompt = f"""Grade the following student answer against the provided rubric.
+
+RUBRIC:
+{rubric}
+
+STUDENT ANSWER:
+{raw_text}
+
+Analyze the answer step by step according to the rubric. For each step you identify, provide:
+1. step_num: sequential number
+2. step_type: type of step (e.g., "Setup", "Calculation", "Derivation", "Final Answer")
+3. text: the relevant portion of the student's answer
+4. latex: any mathematical expression (or empty string if none)
+5. marks_awarded: numeric score for this step
+6. max_marks: maximum possible marks for this step (derive from rubric)
+7. sympy_valid: true/false if any equation is present and valid
+8. error_type: null if correct, or one of "algebraic_error", "missing_step", "wrong_formula", "presentation"
+9. justification: one-sentence explanation of the score
+
+Return ONLY valid JSON (no markdown, no code fences) with this structure:
+{{
+  "steps": [
+    {{
+      "step_num": 1,
+      "step_type": "...",
+      "text": "...",
+      "latex": "...",
+      "marks_awarded": 0.0,
+      "max_marks": 0.0,
+      "sympy_valid": true,
+      "error_type": null,
+      "justification": "..."
+    }}
+  ],
+  "overall_confidence": 0.0,
+  "overall_justification": "..."
+}}"""
+
+    # Call Gemini
+    gemini_result = call_gemini(
+        prompt=grade_prompt,
+        system_prompt="You are an expert exam grader. Grade student answers against rubrics strictly and fairly. Output ONLY valid JSON.",
+        temperature=0.2,
+        max_tokens=4096,
+        call_type="practice_grade"
+    )
+
+    graded_steps = []
+    confidence = 0.85
+    overall_justification = "AI grading completed."
+
+    if gemini_result.get("success"):
+        parsed = parse_json_response(gemini_result["response_text"])
+        if isinstance(parsed, dict) and "steps" in parsed:
+            graded_steps = parsed["steps"]
+            confidence = parsed.get("overall_confidence", 0.85)
+            overall_justification = parsed.get("overall_justification", "AI grading completed.")
+        elif isinstance(parsed, list):
+            graded_steps = parsed
+    else:
+        logger.warning(f"Gemini grading failed for practice: {gemini_result.get('error')}")
+        overall_justification = "AI grading encountered an error. Default scores applied."
+
+    if not graded_steps:
+        graded_steps = [
+            {
+                "step_num": 1,
+                "step_type": "Answer",
+                "text": raw_text[:200] if raw_text != "[No extractable text found]" else "Uploaded answer sheet",
+                "latex": "",
+                "marks_awarded": 0.0,
+                "max_marks": 5.0,
+                "sympy_valid": False,
+                "error_type": "missing_step",
+                "justification": "Could not evaluate automatically. Please review manually."
+            }
+        ]
+
+    # Store practice in DB
     practice = Practice(
         user_id=current_user.id,
         file_key=f"s3://practice/{uuid.uuid4()}/{file.filename}",
         file_name=file.filename,
-        file_type=file.filename.split('.')[-1] if file.filename else "pdf",
-        raw_text="Mock OCR text from uploaded file",
+        file_type=file_ext.lstrip(".") or "pdf",
+        raw_text=raw_text[:5000],
         status="GRADED",
         title=f"Practice - {file.filename or 'Submission'}",
         rubric_json={"text": rubric}
     )
-
     db.add(practice)
     await db.flush()
 
-    # Create mock practice steps
-    mock_step_data = [
-        {
-            "step_num": 1,
-            "step_type": "Initial Setup",
-            "text": "Let x = sin(t)",
-            "latex": "x = \\sin(t)",
-            "marks_awarded": 1.0,
-            "max_marks": 1.0,
-            "sympy_valid": True,
-            "error_type": None,
-            "justification": "Correct substitution choice."
-        },
-        {
-            "step_num": 2,
-            "step_type": "Differential",
-            "text": "dx = cos(t) dt",
-            "latex": "dx = \\cos(t) dt",
-            "marks_awarded": 1.0,
-            "max_marks": 1.0,
-            "sympy_valid": True,
-            "error_type": None,
-            "justification": "Derivative computed correctly."
-        },
-        {
-            "step_num": 3,
-            "step_type": "Integration",
-            "text": "∫ sin²(t) cos(t) dt",
-            "latex": "\\int \\sin^2(t) \\cos(t) dt",
-            "marks_awarded": 2.0,
-            "max_marks": 2.0,
-            "sympy_valid": True,
-            "error_type": None,
-            "justification": "Integration setup is correct."
-        },
-        {
-            "step_num": 4,
-            "step_type": "Final Answer",
-            "text": "= (1/3)sin³(t) + C",
-            "latex": "= \\frac{1}{3}\\sin^3(t) + C",
-            "marks_awarded": 2.0,
-            "max_marks": 2.0,
-            "sympy_valid": True,
-            "error_type": None,
-            "justification": "Final answer is complete with constant of integration."
-        }
-    ]
+    total_marks = 0.0
+    total_max = 0.0
+    for step_data in graded_steps:
+        marks = float(step_data.get("marks_awarded", 0))
+        max_m = float(step_data.get("max_marks", 5))
+        total_marks += marks
+        total_max += max_m
 
-    # Create practice steps
-    for step_data in mock_step_data:
         step = PracticeStep(
             practice_id=practice.id,
-            step_num=step_data["step_num"],
-            step_type=step_data["step_type"],
-            text=step_data["text"],
-            latex=step_data["latex"],
-            marks_awarded=step_data["marks_awarded"],
-            max_marks=step_data["max_marks"],
-            sympy_valid=step_data["sympy_valid"],
-            error_type=step_data["error_type"],
-            justification=step_data["justification"]
+            step_num=int(step_data.get("step_num", 1)),
+            step_type=step_data.get("step_type", "Calculation"),
+            text=step_data.get("text", ""),
+            latex=step_data.get("latex", ""),
+            marks_awarded=marks,
+            max_marks=max_m,
+            sympy_valid=step_data.get("sympy_valid", False),
+            error_type=step_data.get("error_type"),
+            justification=step_data.get("justification", "")
         )
         db.add(step)
 
     await db.flush()
 
-    # Create grade result
-    total_marks = sum(s["marks_awarded"] for s in mock_step_data)
-    total_max = sum(s["max_marks"] for s in mock_step_data)
-    
     step_grades = [
-        {
-            "step_num": s["step_num"],
-            "marks_awarded": s["marks_awarded"],
-            "max_marks": s["max_marks"],
-            "error_type": s["error_type"],
-            "justification": s["justification"]
-        }
-        for s in mock_step_data
+        {"step_num": s.get("step_num", i+1), "marks_awarded": float(s.get("marks_awarded", 0)),
+         "max_marks": float(s.get("max_marks", 5)), "error_type": s.get("error_type"),
+         "justification": s.get("justification", "")}
+        for i, s in enumerate(graded_steps)
     ]
 
     grade_result = PracticeGradeResult(
         practice_id=practice.id,
         grade=total_marks,
-        max_grade=total_max,
-        confidence=0.92,
+        max_grade=total_max if total_max > 0 else 5.0,
+        confidence=confidence,
         step_grades=step_grades,
-        model_used="claude-3.5-sonnet",
-        justification="Well-structured solution with correct mathematical reasoning throughout."
+        model_used="gemini-2.5-pro",
+        justification=overall_justification
     )
 
     db.add(grade_result)
