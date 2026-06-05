@@ -1,9 +1,9 @@
-# Edexia Backend: AI Assessment Operating System (AIOS)
+# OzymorLab: AI Assessment Operating System (AIOS)
 
-Welcome to the **Edexia AIOS Backend**, the core orchestration layer for processing, parsing, and evaluating handwritten student answer sheets at an institutional scale.
+Welcome to the **OzymorLab**, the core orchestration layer for processing, parsing, and evaluating handwritten student answer sheets at an institutional scale.
 
 ## What is this repository?
-This is the **Core Monolith**. It acts as the brain of the Edexia Assessment Engine. It handles everything from student file uploads to the final LLM-driven grading justification. It coordinates parsing, dynamic rubric injection, mathematical equation verification, and orchestrates async evaluation workflows using FastAPI `BackgroundTasks` and `asyncio`.
+This is the **Core Monolith**. It acts as the brain of the Assessment Engine. It handles everything from student file uploads to the final LLM-driven grading justification. It coordinates parsing, dynamic rubric injection, mathematical equation verification, and orchestrates async evaluation workflows using FastAPI `BackgroundTasks` and `asyncio`.
 
 ### Core Features:
 - **Multi-Tenant Institutional Architecture**: Built to support large-scale rollouts with robust hierarchical models mapping `Schools`, `ExamCycles`, `Class Standards`, `Sections`, and `Students`. It enforces strict multi-level Role-Based Access Control (RBAC) across Teachers, Evaluators, HODs, and Principals.
@@ -47,4 +47,3 @@ docker compose up --build
 You can verify the components are running:
 - Main Backend API: `http://localhost:8000/docs`
 - DEIS Gateway API: `http://localhost:8001/docs`
-- Grafana: `http://localhost:3001` (admin password configured in `.env`)
