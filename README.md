@@ -51,3 +51,4 @@ You can verify the components are running:
 
 ### Helping Organisation
 [![GitGem](https://gitgem.org/api/badge/github/owner/repo.svg)](https://gitgem.org/github/owner/repo)
+[![Open Source Helpers](https://www.codetriage.com/ozymorlab/ozymorlab-backend/badges/users.svg)](https://www.codetriage.com/ozymorlab/ozymorlab-backend)
