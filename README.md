@@ -47,3 +47,7 @@ docker compose up --build
 You can verify the components are running:
 - Main Backend API: `http://localhost:8000/docs`
 - DEIS Gateway API: `http://localhost:8001/docs`
+
+
+### Helping Organisation
+[![GitGem](https://gitgem.org/api/badge/github/owner/repo.svg)](https://gitgem.org/github/owner/repo)
