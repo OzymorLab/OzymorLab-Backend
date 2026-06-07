@@ -8,6 +8,7 @@ Run with:
 These are LIVE tests — they make real network calls.
 They are skipped automatically when keys are not configured.
 """
+import os
 import pytest
 from app.config import settings
 
@@ -15,8 +16,8 @@ from app.config import settings
 # ─── Gemini ──────────────────────────────────────────────────────────────────
 
 @pytest.mark.skipif(
-    not settings.GEMINI_API_KEY,
-    reason="GEMINI_API_KEY is not configured — skipping",
+    not settings.GEMINI_API_KEY or os.getenv("CI") == "true",
+    reason="GEMINI_API_KEY is not configured or running in CI — skipping",
 )
 def test_gemini_api_key_is_valid():
     """
@@ -60,8 +61,8 @@ def test_gemini_api_key_is_valid():
 # ─── Claude ──────────────────────────────────────────────────────────────────
 
 @pytest.mark.skipif(
-    not settings.CLAUDE_API_KEY,
-    reason="CLAUDE_API_KEY is not configured — skipping",
+    not settings.CLAUDE_API_KEY or os.getenv("CI") == "true",
+    reason="CLAUDE_API_KEY is not configured or running in CI — skipping",
 )
 def test_claude_api_key_is_valid():
     """
@@ -117,8 +118,8 @@ def test_claude_api_key_is_valid():
 # ─── Strategy / Fallback ─────────────────────────────────────────────────────
 
 @pytest.mark.skipif(
-    not settings.GEMINI_API_KEY and not settings.CLAUDE_API_KEY,
-    reason="No LLM keys configured at all — skipping",
+    (not settings.GEMINI_API_KEY and not settings.CLAUDE_API_KEY) or os.getenv("CI") == "true",
+    reason="No LLM keys configured or running in CI — skipping",
 )
 def test_call_llm_strategy_produces_response():
     """
@@ -164,8 +165,8 @@ def test_call_llm_strategy_produces_response():
 # ─── OpenRouter ──────────────────────────────────────────────────────────────
 
 @pytest.mark.skipif(
-    not settings.OPENROUTER_API_KEY,
-    reason="OPENROUTER_API_KEY is not configured — skipping",
+    not settings.OPENROUTER_API_KEY or os.getenv("CI") == "true",
+    reason="OPENROUTER_API_KEY is not configured or running in CI — skipping",
 )
 def test_openrouter_api_key_is_valid():
     """
