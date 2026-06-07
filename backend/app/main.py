@@ -2,6 +2,20 @@
 AIOS — Assessment Intelligence Operating System
 FastAPI application entry point.
 """
+import socket
+original_getaddrinfo = socket.getaddrinfo
+def patched_getaddrinfo(host, port, *args, **kwargs):
+    # Route main external APIs directly to their resolved IPs if DNS times out
+    resolved_ips = {
+        'aws-1-ap-northeast-1.pooler.supabase.com': '13.114.6.6',
+        'acizmsahtbnmjwldmqkm.supabase.co': '172.64.149.246',
+        'openrouter.ai': '104.18.2.115',
+    }
+    if host in resolved_ips:
+        return original_getaddrinfo(resolved_ips[host], port, *args, **kwargs)
+    return original_getaddrinfo(host, port, *args, **kwargs)
+socket.getaddrinfo = patched_getaddrinfo
+
 import logging
 from contextlib import asynccontextmanager
 

@@ -40,12 +40,18 @@ class Settings(BaseSettings):
     CLAUDE_API_KEY: str = ""
     CLAUDE_MODEL: str = "claude-opus-4-5"
 
+    # ── OpenRouter (primary provider — routes to any hosted model) ──
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL: str = "google/gemini-2.5-flash"  # default model via OpenRouter
+
     # ── LLM Provider Strategy ──
-    # "claude_primary"  → Claude first, Gemini fallback (default)
-    # "gemini_primary"  → Gemini first, Claude fallback
-    # "gemini_only"     → Gemini only, no fallback
-    # "claude_only"     → Claude only, no fallback
-    LLM_PROVIDER_STRATEGY: str = "claude_primary"
+    # "openrouter_primary" → OpenRouter first, Gemini fallback  (default)
+    # "claude_primary"     → Claude first, Gemini fallback
+    # "gemini_primary"     → Gemini first, Claude fallback
+    # "openrouter_only"    → OpenRouter only, no fallback
+    # "gemini_only"        → Gemini only, no fallback
+    # "claude_only"        → Claude only, no fallback
+    LLM_PROVIDER_STRATEGY: str = "openrouter_primary"
 
     # ── Grading ──
     GRADING_TEMPERATURE: float = 0.0

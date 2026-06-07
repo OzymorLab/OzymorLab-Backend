@@ -9,7 +9,7 @@ Flow:
 """
 import logging
 from app.services.parsing import extract_text
-from app.services.llm_client import call_gemini, parse_json_response
+from app.services.llm_client import call_llm, parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ Rules:
 - Use marking_notes to specify what earns partial credit.
 """
 
-    result = call_gemini(
+    result = call_llm(
         prompt,
         system_prompt=RUBRIC_GENERATION_SYSTEM_PROMPT,
         temperature=0.1,

@@ -14,7 +14,7 @@ This creates dynamic evaluation workflows:
   "Label map"            → diagram + labels
 """
 import logging
-from app.services.llm_client import call_gemini, parse_json_response
+from app.services.llm_client import call_llm, parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ Rules:
 - All other explanation/definition/theory steps belong to "text".
 """
 
-    result = call_gemini(
+    result = call_llm(
         prompt,
         system_prompt=DECOMPOSITION_SYSTEM_PROMPT,
         temperature=0.0,

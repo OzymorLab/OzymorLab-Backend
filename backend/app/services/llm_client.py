@@ -1,11 +1,13 @@
 """
-LLM Client — Multi-provider AI wrapper with Claude primary, Gemini fallback.
+LLM Client — Multi-provider AI wrapper.
 
-Provider strategy is controlled by LLM_PROVIDER_STRATEGY in settings:
-  "claude_primary"  → Claude first, Gemini fallback  (default)
-  "gemini_primary"  → Gemini first, Claude fallback
-  "gemini_only"     → Gemini only, no fallback
-  "claude_only"     → Claude only, no fallback
+Provider strategy (LLM_PROVIDER_STRATEGY):
+  "openrouter_primary" → OpenRouter first, Gemini fallback       (default)
+  "claude_primary"     → Claude first, Gemini fallback
+  "gemini_primary"     → Gemini first, Claude fallback
+  "openrouter_only"    → OpenRouter only, no fallback
+  "gemini_only"        → Gemini only
+  "claude_only"        → Claude only
 """
 import json
 import time
@@ -23,39 +25,139 @@ logger = logging.getLogger(__name__)
 
 # ─── Gemini client cache ─────────────────────────────────────────────────────
 
-_client: genai.Client | None = None
-_client_key: str | None = None
+_gemini_client: genai.Client | None = None
+_gemini_client_key: str | None = None
 
 
 def get_client(api_key: str | None = None) -> genai.Client:
     """Get or create a Gemini client. Supports BYOK via api_key override."""
-    global _client, _client_key
+    global _gemini_client, _gemini_client_key
     key = api_key or settings.GEMINI_API_KEY
-
-    # If a BYOK key is provided, always create a fresh client (don't pollute cache)
     if api_key:
         return genai.Client(api_key=api_key)
+    if _gemini_client is None or _gemini_client_key != key:
+        _gemini_client = genai.Client(api_key=key) if key else genai.Client()
+        _gemini_client_key = key
+    return _gemini_client
 
-    # Use cached system client
-    if _client is None or _client_key != key:
-        if key:
-            _client = genai.Client(api_key=key)
+
+# ─── OpenRouter provider ─────────────────────────────────────────────────────
+
+def _call_openrouter_raw(
+    prompt: str,
+    system_prompt: str = "",
+    temperature: float = 0.0,
+    max_tokens: int = 2048,
+    image_bytes: bytes | list[bytes] | None = None,
+    image_mime: str | list[str] = "image/png",
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """
+    Single call to OpenRouter (OpenAI-compatible REST API).
+    Supports vision via base64-encoded image in the messages array.
+    """
+    import httpx
+
+    key = api_key or settings.OPENROUTER_API_KEY
+    if not key:
+        return {
+            "response_text": "", "tokens_in": 0, "tokens_out": 0,
+            "latency_ms": 0, "model": settings.OPENROUTER_MODEL,
+            "success": False, "error": "OPENROUTER_API_KEY not configured",
+        }
+
+    model = settings.OPENROUTER_MODEL
+    messages: list[dict] = []
+
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+
+    # Build user message — text only or multimodal
+    if image_bytes:
+        image_bytes_list = [image_bytes] if isinstance(image_bytes, bytes) else image_bytes
+        if isinstance(image_mime, str):
+            image_mime_list = [image_mime] * len(image_bytes_list)
         else:
-            _client = genai.Client()  # Fall back to SDK's automatic env var checking
-        _client_key = key
-    return _client
+            image_mime_list = image_mime
+
+        content_parts = []
+        for img_b, img_m in zip(image_bytes_list, image_mime_list):
+            b64 = base64.standard_b64encode(img_b).decode("utf-8")
+            content_parts.append({"type": "image_url", "image_url": {"url": f"data:{img_m};base64,{b64}"}})
+        content_parts.append({"type": "text", "text": prompt})
+
+        messages.append({
+            "role": "user",
+            "content": content_parts,
+        })
+    else:
+        messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://ozymorlab.com",
+        "X-Title": "OzymorLab",
+    }
+
+    try:
+        start = time.time()
+        response = httpx.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=120.0,
+        )
+        latency_ms = int((time.time() - start) * 1000)
+
+        if response.status_code != 200:
+            return {
+                "response_text": "", "tokens_in": 0, "tokens_out": 0,
+                "latency_ms": latency_ms, "model": model,
+                "success": False, "error": f"HTTP {response.status_code}: {response.text[:200]}",
+            }
+
+        data = response.json()
+        choice = data.get("choices", [{}])[0]
+        response_text = choice.get("message", {}).get("content", "") or ""
+        usage = data.get("usage", {})
+        tokens_in = usage.get("prompt_tokens", 0)
+        tokens_out = usage.get("completion_tokens", 0)
+
+        logger.info(
+            f"OpenRouter [{model}] {latency_ms}ms "
+            f"({tokens_in}/{tokens_out} tokens)"
+        )
+        return {
+            "response_text": response_text,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "latency_ms": latency_ms,
+            "model": model,
+            "success": True,
+        }
+    except Exception as e:
+        return {
+            "response_text": "", "tokens_in": 0, "tokens_out": 0,
+            "latency_ms": 0, "model": model,
+            "success": False, "error": str(e),
+        }
 
 
-# ─── Claude helpers ──────────────────────────────────────────────────────────
+# ─── Claude provider ─────────────────────────────────────────────────────────
 
 def _get_anthropic_client(api_key: str | None = None):
-    """Lazy-import anthropic and return a client."""
     try:
         import anthropic  # type: ignore
     except ImportError:
-        raise RuntimeError(
-            "anthropic package is not installed. Run: pip install anthropic"
-        )
+        raise RuntimeError("anthropic package is not installed. Run: pip install anthropic")
     key = api_key or settings.CLAUDE_API_KEY
     if not key:
         raise RuntimeError("CLAUDE_API_KEY is not configured.")
@@ -67,27 +169,30 @@ def _call_claude_raw(
     system_prompt: str = "",
     temperature: float = 0.0,
     max_tokens: int = 2048,
-    image_bytes: bytes | None = None,
-    image_mime: str = "image/png",
+    image_bytes: bytes | list[bytes] | None = None,
+    image_mime: str | list[str] = "image/png",
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Single call to Claude. Returns same shape as call_gemini()."""
     client = _get_anthropic_client(api_key)
     model = settings.CLAUDE_MODEL
-
-    # Build content list
     content: list = []
     if image_bytes:
-        content.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": image_mime,
-                "data": base64.standard_b64encode(image_bytes).decode("utf-8"),
-            },
-        })
-    content.append({"type": "text", "text": prompt})
+        image_bytes_list = [image_bytes] if isinstance(image_bytes, bytes) else image_bytes
+        if isinstance(image_mime, str):
+            image_mime_list = [image_mime] * len(image_bytes_list)
+        else:
+            image_mime_list = image_mime
 
+        for img_b, img_m in zip(image_bytes_list, image_mime_list):
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img_m,
+                    "data": base64.standard_b64encode(img_b).decode("utf-8"),
+                },
+            })
+    content.append({"type": "text", "text": prompt})
     try:
         import anthropic  # type: ignore
         start = time.time()
@@ -104,12 +209,9 @@ def _call_claude_raw(
         tokens_out = response.usage.output_tokens if response.usage else 0
         logger.info(f"Claude {latency_ms}ms ({tokens_in}/{tokens_out} tokens)")
         return {
-            "response_text": response_text,
-            "tokens_in": tokens_in,
-            "tokens_out": tokens_out,
-            "latency_ms": latency_ms,
-            "model": model,
-            "success": True,
+            "response_text": response_text, "tokens_in": tokens_in,
+            "tokens_out": tokens_out, "latency_ms": latency_ms,
+            "model": model, "success": True,
         }
     except Exception as e:
         return {
@@ -118,25 +220,31 @@ def _call_claude_raw(
         }
 
 
+# ─── Gemini provider ─────────────────────────────────────────────────────────
+
 def _call_gemini_raw(
     prompt: str,
     system_prompt: str = "",
     temperature: float = 0.0,
     max_tokens: int = 2048,
-    image_bytes: bytes | None = None,
-    image_mime: str = "image/png",
+    image_bytes: bytes | list[bytes] | None = None,
+    image_mime: str | list[str] = "image/png",
     call_type: str = "general",
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Single-attempt Gemini call (no retry). Returns same shape as call_gemini()."""
     client = get_client(api_key=api_key)
     model = settings.GEMINI_MODEL
-
     contents: list = []
     if image_bytes:
-        contents.append(types.Part.from_bytes(data=image_bytes, mime_type=image_mime))
-    contents.append(prompt)
+        image_bytes_list = [image_bytes] if isinstance(image_bytes, bytes) else image_bytes
+        if isinstance(image_mime, str):
+            image_mime_list = [image_mime] * len(image_bytes_list)
+        else:
+            image_mime_list = image_mime
 
+        for img_b, img_m in zip(image_bytes_list, image_mime_list):
+            contents.append(types.Part.from_bytes(data=img_b, mime_type=img_m))
+    contents.append(prompt)
     try:
         start = time.time()
         response = client.models.generate_content(
@@ -156,12 +264,9 @@ def _call_gemini_raw(
             tokens_out = response.usage_metadata.candidates_token_count or 0
         logger.info(f"Gemini [{call_type}] {latency_ms}ms ({tokens_in}/{tokens_out} tokens)")
         return {
-            "response_text": response_text,
-            "tokens_in": tokens_in,
-            "tokens_out": tokens_out,
-            "latency_ms": latency_ms,
-            "model": model,
-            "success": True,
+            "response_text": response_text, "tokens_in": tokens_in,
+            "tokens_out": tokens_out, "latency_ms": latency_ms,
+            "model": model, "success": True,
         }
     except Exception as e:
         return {
@@ -178,52 +283,66 @@ def call_llm(
     temperature: float | None = None,
     max_tokens: int = 2048,
     call_type: str = "general",
-    image_bytes: bytes | None = None,
-    image_mime: str = "image/png",
+    image_bytes: bytes | list[bytes] | None = None,
+    image_mime: str | list[str] = "image/png",
     api_key: str | None = None,
 ) -> dict[str, Any]:
     """
     Unified LLM call respecting LLM_PROVIDER_STRATEGY.
 
-    Strategy routing:
-      claude_primary  → Claude → Gemini fallback  (default)
-      gemini_primary  → Gemini → Claude fallback
-      claude_only     → Claude only
-      gemini_only     → Gemini only (with retries via call_gemini)
-
-    image_bytes/image_mime are forwarded for vision tasks (OCR, diagram detection).
+    Strategies:
+      openrouter_primary → OpenRouter → Gemini fallback  (default)
+      claude_primary     → Claude    → Gemini fallback
+      gemini_primary     → Gemini    → Claude fallback
+      openrouter_only    → OpenRouter only
+      claude_only        → Claude only
+      gemini_only        → Gemini only (with retries)
     """
     temp = temperature if temperature is not None else settings.GRADING_TEMPERATURE
     strategy = settings.LLM_PROVIDER_STRATEGY.lower()
 
+    def _openrouter() -> dict[str, Any]:
+        return _call_openrouter_raw(
+            prompt, system_prompt, temp, max_tokens, image_bytes, image_mime, api_key
+        )
+
     def _claude() -> dict[str, Any]:
         try:
-            return _call_claude_raw(prompt, system_prompt, temp, max_tokens,
-                                    image_bytes, image_mime, api_key)
+            return _call_claude_raw(
+                prompt, system_prompt, temp, max_tokens, image_bytes, image_mime, api_key
+            )
         except RuntimeError as e:
-            # Key not configured or package missing — treat as provider failure
-            return {"response_text": "", "tokens_in": 0, "tokens_out": 0,
-                    "latency_ms": 0, "model": settings.CLAUDE_MODEL,
-                    "success": False, "error": str(e)}
+            return {
+                "response_text": "", "tokens_in": 0, "tokens_out": 0,
+                "latency_ms": 0, "model": settings.CLAUDE_MODEL,
+                "success": False, "error": str(e),
+            }
 
     def _gemini() -> dict[str, Any]:
-        return _call_gemini_raw(prompt, system_prompt, temp, max_tokens,
-                                image_bytes, image_mime, call_type, api_key)
+        return _call_gemini_raw(
+            prompt, system_prompt, temp, max_tokens, image_bytes, image_mime, call_type, api_key
+        )
 
+    # Single-provider strategies
+    if strategy == "openrouter_only":
+        return _openrouter()
     if strategy == "claude_only":
         return _claude()
-
     if strategy == "gemini_only":
-        # Keep original retry behaviour for gemini-only mode
         return call_gemini(prompt, system_prompt, temp, max_tokens, call_type, api_key)
 
-    if strategy == "gemini_primary":
-        primary, fallback, primary_name, fallback_name = _gemini, _claude, "Gemini", "Claude"
-    else:
-        # Default: claude_primary
-        primary, fallback, primary_name, fallback_name = _claude, _gemini, "Claude", "Gemini"
+    # Two-provider strategies with fallback
+    strategy_map = {
+        "openrouter_primary": (_openrouter, _gemini,    "OpenRouter", "Gemini"),
+        "claude_primary":     (_claude,     _gemini,    "Claude",     "Gemini"),
+        "gemini_primary":     (_gemini,     _claude,    "Gemini",     "Claude"),
+    }
+    primary_fn, fallback_fn, primary_name, fallback_name = strategy_map.get(
+        strategy,
+        (_openrouter, _gemini, "OpenRouter", "Gemini"),  # default
+    )
 
-    result = primary()
+    result = primary_fn()
     if result["success"]:
         return result
 
@@ -231,7 +350,7 @@ def call_llm(
         f"[{call_type}] {primary_name} failed ({result.get('error', 'unknown')}). "
         f"Falling back to {fallback_name}."
     )
-    fallback_result = fallback()
+    fallback_result = fallback_fn()
     if not fallback_result["success"]:
         logger.error(
             f"[{call_type}] {fallback_name} fallback also failed: "
@@ -240,68 +359,7 @@ def call_llm(
     return fallback_result
 
 
-# ─── Legacy call_gemini (kept for backward compat & gemini_only strategy) ────
-
-def get_grading_system_prompt(
-    subject: str = "General",
-    board: str = "Generic",
-    grade_level: str = "Unknown",
-) -> str:
-    """Load the base system prompt dynamically and append all markdown KB files."""
-    base_prompt = (
-        f"You are an expert {board} examiner ({grade_level} {subject}) with 15 years of experience.\n"
-        f"You grade subjective answers and derivations step by step, awarding partial marks according to the {board} marking scheme.\n"
-        "You output ONLY valid JSON — no preamble, no markdown, no code fences.\n\n"
-        "Grading philosophy:\n"
-        "- Award marks for correct method even if the final answer is wrong\n"
-        "- Penalize errors in intermediate steps that cascade\n"
-        "- Accept equivalent mathematical expressions (e.g., F=ma and a=F/m are equivalent)\n"
-        "- If a step is partially correct, award proportional partial credit"
-    )
-
-    prompt = base_prompt
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    kb_dir = os.path.join(os.path.dirname(os.path.dirname(current_dir)), "kb")
-
-    if os.path.exists(kb_dir):
-        prompt += "\n\n--- ADDITIONAL GRADING GUIDELINES (KNOWLEDGE BASE) ---"
-        for filename in sorted(os.listdir(kb_dir)):
-            if filename.endswith(".md"):
-                filepath = os.path.join(kb_dir, filename)
-                try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        prompt += f"\n\n### Document: {filename}\n"
-                        prompt += f.read()
-                except Exception as e:
-                    logger.error(f"Failed to load KB file {filename}: {e}")
-
-    return prompt
-
-
-ALIGNMENT_SYSTEM_PROMPT = (
-    "You are an expert at analyzing student answers and mapping them to rubric steps.\n"
-    "Given rubric steps and student answer steps, map each rubric step to the most relevant student step(s).\n"
-    "Output ONLY valid JSON — no preamble, no markdown, no code fences."
-)
-
-
-def extract_text_from_image_gemini(image_bytes: bytes) -> str:
-    """Use Gemini Vision to transcribe fuzzy handwritten text and math."""
-    client = get_client()
-    try:
-        response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                "Extract all the handwritten text, mathematical equations, and derivations "
-                "from this image exactly as written. Do not summarize. Just output the transcribed text.",
-            ],
-        )
-        return response.text or ""
-    except Exception as e:
-        logger.error(f"Gemini Vision OCR failed: {e}")
-        raise
-
+# ─── Legacy call_gemini (kept for backward compat) ───────────────────────────
 
 def call_gemini(
     prompt: str,
@@ -311,16 +369,10 @@ def call_gemini(
     call_type: str = "general",
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Make a call to Gemini API with retry logic and exponential backoff.
-
-    Args:
-        api_key: Optional BYOK Gemini API key. If provided, uses this key
-                 instead of the system-wide key from settings.
-    """
+    """Legacy Gemini call with retry. Prefer call_llm() for new code."""
     client = get_client(api_key=api_key)
     temp = temperature if temperature is not None else settings.GRADING_TEMPERATURE
     model = settings.GEMINI_MODEL
-
     last_error = None
     for attempt in range(settings.GRADING_MAX_RETRIES):
         try:
@@ -336,12 +388,10 @@ def call_gemini(
             )
             latency_ms = int((time.time() - start_time) * 1000)
             response_text = response.text or ""
-
             tokens_in = tokens_out = 0
             if response.usage_metadata:
                 tokens_in = response.usage_metadata.prompt_token_count or 0
                 tokens_out = response.usage_metadata.candidates_token_count or 0
-
             logger.info(f"Gemini [{call_type}] {latency_ms}ms ({tokens_in}/{tokens_out} tokens)")
             return {
                 "response_text": response_text, "tokens_in": tokens_in,
@@ -351,17 +401,72 @@ def call_gemini(
         except Exception as e:
             last_error = e
             wait_time = (2 ** attempt) + 0.5
-            logger.warning(
-                f"Gemini [{call_type}] attempt {attempt + 1} failed: {e}. "
-                f"Retry in {wait_time:.1f}s"
-            )
+            logger.warning(f"Gemini [{call_type}] attempt {attempt + 1} failed: {e}. Retry in {wait_time:.1f}s")
             time.sleep(wait_time)
-
     logger.error(f"Gemini [{call_type}] failed after {settings.GRADING_MAX_RETRIES} attempts")
     return {
         "response_text": "", "tokens_in": 0, "tokens_out": 0,
         "latency_ms": 0, "model": model, "success": False, "error": str(last_error),
     }
+
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+
+def get_grading_system_prompt(
+    subject: str = "General",
+    board: str = "Generic",
+    grade_level: str = "Unknown",
+) -> str:
+    """Load the base system prompt and append all markdown KB files."""
+    base_prompt = (
+        f"You are an expert {board} examiner ({grade_level} {subject}) with 15 years of experience.\n"
+        f"You grade subjective answers and derivations step by step, awarding partial marks according to the {board} marking scheme.\n"
+        "You output ONLY valid JSON — no preamble, no markdown, no code fences.\n\n"
+        "Grading philosophy:\n"
+        "- Award marks for correct method even if the final answer is wrong\n"
+        "- Penalize errors in intermediate steps that cascade\n"
+        "- Accept equivalent mathematical expressions (e.g., F=ma and a=F/m are equivalent)\n"
+        "- If a step is partially correct, award proportional partial credit"
+    )
+    prompt = base_prompt
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    kb_dir = os.path.join(os.path.dirname(os.path.dirname(current_dir)), "kb")
+    if os.path.exists(kb_dir):
+        prompt += "\n\n--- ADDITIONAL GRADING GUIDELINES (KNOWLEDGE BASE) ---"
+        for filename in sorted(os.listdir(kb_dir)):
+            if filename.endswith(".md"):
+                filepath = os.path.join(kb_dir, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        prompt += f"\n\n### Document: {filename}\n"
+                        prompt += f.read()
+                except Exception as e:
+                    logger.error(f"Failed to load KB file {filename}: {e}")
+    return prompt
+
+
+ALIGNMENT_SYSTEM_PROMPT = (
+    "You are an expert at analyzing student answers and mapping them to rubric steps.\n"
+    "Given rubric steps and student answer steps, map each rubric step to the most relevant student step(s).\n"
+    "Output ONLY valid JSON — no preamble, no markdown, no code fences."
+)
+
+
+def extract_text_from_image_gemini(image_bytes: bytes) -> str:
+    """Use vision-capable LLM to transcribe handwritten text and math."""
+    result = call_llm(
+        prompt=(
+            "Extract all the handwritten text, mathematical equations, and derivations "
+            "from this image exactly as written. Do not summarize. Just output the transcribed text."
+        ),
+        image_bytes=image_bytes,
+        image_mime="image/jpeg",
+        call_type="ocr_image",
+    )
+    if result["success"]:
+        return result["response_text"]
+    logger.error(f"Vision OCR failed: {result.get('error')}")
+    raise RuntimeError(f"Vision OCR failed: {result.get('error')}")
 
 
 def parse_json_response(response_text: str) -> dict | list | None:
@@ -395,14 +500,12 @@ def build_step_grading_prompt(
     sympy_result: dict | None = None,
     board_notes: str = "",
 ) -> str:
-    """Build the grading prompt for a single rubric step."""
     sympy_ctx = ""
     if sympy_result:
         if sympy_result.get("valid") is True:
             sympy_ctx = "[SYMBOLIC VALIDATION: Equation transformation is mathematically correct]"
         elif sympy_result.get("valid") is False:
             sympy_ctx = f"[SYMBOLIC VALIDATION: ERROR — {sympy_result.get('error', 'Unknown')}]"
-
     mm = rubric_step.get("marks", 1)
     return (
         f"RUBRIC STEP {rubric_step.get('step_num', '?')} (max {mm} marks):\n"
@@ -420,7 +523,6 @@ def build_step_grading_prompt(
 
 
 def build_alignment_prompt(rubric_steps: list[dict], student_steps: list[dict]) -> str:
-    """Build prompt to align student steps to rubric steps."""
     r_desc = "\n".join(
         f"  Rubric Step {s.get('step_num', i + 1)}: {s.get('description', '')}"
         for i, s in enumerate(rubric_steps)

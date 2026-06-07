@@ -21,7 +21,7 @@ from app.services.auth_service import (
     check_submission_access
 )
 from app.services.parsing import extract_text_from_pdf
-from app.services.llm_client import extract_text_from_image_gemini, call_gemini, parse_json_response
+from app.services.llm_client import extract_text_from_image_gemini, call_llm, parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -653,7 +653,7 @@ async def chat_analysis_copilot(
     # ─────────────────────────────────────────
     
     # If submission is missing or we want an LLM answer, use the LLM
-    from app.services.llm_client import call_gemini
+    from app.services.llm_client import call_llm
     
     # Check for specific step number mentions
     target_step = None
@@ -723,7 +723,7 @@ async def chat_analysis_copilot(
                     for e in errors[:3]:
                         llm_prompt += f"- Step {e.step_num}: {e.error_type}\n"
 
-    llm_res = call_gemini(llm_prompt, system_prompt=sys_prompt, max_tokens=400)
+    llm_res = call_llm(llm_prompt, system_prompt=sys_prompt, max_tokens=400)
     
     ai_text = llm_res.get("response_text", "I'm here to help! Could you clarify your question?")
     aligned_step = target_step or (1 if (not submission and not is_ws) else None)
@@ -875,8 +875,8 @@ Return ONLY valid JSON (no markdown, no code fences) with this structure:
   "overall_justification": "..."
 }}"""
 
-    # Call Gemini
-    gemini_result = call_gemini(
+    # Call LLM
+    gemini_result = call_llm(
         prompt=grade_prompt,
         system_prompt="You are an expert exam grader. Grade student answers against rubrics strictly and fairly. Output ONLY valid JSON.",
         temperature=0.2,

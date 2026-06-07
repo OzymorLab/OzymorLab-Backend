@@ -22,10 +22,9 @@ def grade_single_answer(
     """
     Grades a single question's answer independently using Gemini.
     """
-    from app.services.llm_client import get_client, parse_json_response
+    from app.services.llm_client import call_llm, parse_json_response
     from app.services.ingestion import download_file
     from app.config import settings
-    from google.genai import types as genai_types
 
     prompt = f"""
     You are an expert exam evaluator for the {board} board ({subject}, {grade_level}).
@@ -56,7 +55,10 @@ def grade_single_answer(
     
     parts = [prompt]
     
-    # Download and append diagram images if any
+    image_bytes_list = []
+    image_mime_list = []
+    
+    # Download diagram images if any
     if diagram_keys:
         for key in diagram_keys:
             try:
@@ -64,22 +66,25 @@ def grade_single_answer(
                 mime = "image/png"
                 if key.lower().endswith(".jpg") or key.lower().endswith(".jpeg"):
                     mime = "image/jpeg"
-                parts.append(genai_types.Part.from_bytes(data=img_bytes, mime_type=mime))
-                logger.info(f"[Grade] Appended diagram {key} to Gemini grading call")
+                image_bytes_list.append(img_bytes)
+                image_mime_list.append(mime)
+                logger.info(f"[Grade] Appended diagram {key} to LLM grading call")
             except Exception as e:
                 logger.error(f"[Grade] Failed to download diagram {key}: {e}")
 
-    client = get_client(api_key=api_key)
     try:
-        response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
-            contents=parts,
-            config=genai_types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=1024,
-            ),
+        result = call_llm(
+            prompt=prompt,
+            temperature=0.0,
+            max_tokens=1024,
+            image_bytes=image_bytes_list if image_bytes_list else None,
+            image_mime=image_mime_list if image_mime_list else "image/png",
+            call_type="single_answer_grading",
+            api_key=api_key,
         )
-        raw_text = response.text or ""
+        if not result["success"]:
+            raise ValueError(f"LLM call failed: {result.get('error')}")
+        raw_text = result["response_text"] or ""
         parsed = parse_json_response(raw_text)
         if isinstance(parsed, dict):
             # Ensure marks_awarded is clamped

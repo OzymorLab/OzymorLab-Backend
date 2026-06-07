@@ -13,7 +13,7 @@ This pipeline:
 import logging
 
 from app.services.llm_client import (
-    call_gemini, parse_json_response, build_step_grading_prompt,
+    call_llm, parse_json_response, build_step_grading_prompt,
     build_alignment_prompt, get_grading_system_prompt, ALIGNMENT_SYSTEM_PROMPT,
 )
 from app.services.sympy_validator import validate_expected_against_student
@@ -54,7 +54,7 @@ def align_steps(rubric_steps: list[dict], student_steps: list[dict]) -> list[dic
         ]
 
     prompt = build_alignment_prompt(rubric_steps, student_steps)
-    result = call_gemini(
+    result = call_llm(
         prompt, system_prompt=ALIGNMENT_SYSTEM_PROMPT, call_type="alignment"
     )
 
@@ -121,7 +121,7 @@ def grade_single_step(
     system_prompt = get_grading_system_prompt(
         subject=subject, board=board, grade_level=grade_level
     )
-    result = call_gemini(
+    result = call_llm(
         prompt,
         system_prompt=system_prompt,
         temperature=temperature,

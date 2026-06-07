@@ -53,7 +53,7 @@ def test_gemini_api_key_is_valid():
         f"Tip: Check GEMINI_API_KEY in your .env"
     )
     assert result["response_text"].strip(), "Gemini returned an empty response"
-    print(f"\n✅ Gemini OK | model={result['model']} | "
+    print(f"\n[OK] Gemini | model={result['model']} | "
           f"{result['latency_ms']}ms | response='{result['response_text'].strip()}'")
 
 
@@ -110,7 +110,7 @@ def test_claude_api_key_is_valid():
         f"Tip: Check CLAUDE_API_KEY in your .env"
     )
     assert result["response_text"].strip(), "Claude returned an empty response"
-    print(f"\n✅ Claude OK | model={result['model']} | "
+    print(f"\n[OK] Claude | model={result['model']} | "
           f"{result['latency_ms']}ms | response='{result['response_text'].strip()}'")
 
 
@@ -155,7 +155,47 @@ def test_call_llm_strategy_produces_response():
     )
     assert result["response_text"].strip(), "call_llm() returned an empty response"
     print(
-        f"\n✅ call_llm OK | strategy={settings.LLM_PROVIDER_STRATEGY!r} | "
+        f"\n[OK] call_llm | strategy={settings.LLM_PROVIDER_STRATEGY!r} | "
         f"model={result['model']} | {result['latency_ms']}ms | "
         f"response='{result['response_text'].strip()}'"
     )
+
+
+# ─── OpenRouter ──────────────────────────────────────────────────────────────
+
+@pytest.mark.skipif(
+    not settings.OPENROUTER_API_KEY,
+    reason="OPENROUTER_API_KEY is not configured — skipping",
+)
+def test_openrouter_api_key_is_valid():
+    """
+    Sends a minimal prompt to OpenRouter and asserts a non-empty response.
+    """
+    from app.services.llm_client import _call_openrouter_raw
+
+    result = _call_openrouter_raw(
+        prompt="Reply with the single word: PONG",
+        temperature=0.0,
+        max_tokens=16,
+    )
+
+    error_str = str(result.get("error", "")).lower()
+    is_billing_or_rate = any(
+        k in error_str
+        for k in ("429", "quota", "credit", "billing", "rate_limit", "overloaded")
+    )
+
+    if is_billing_or_rate:
+        pytest.skip(
+            f"OpenRouter key is valid but account has billing/rate issues: {result.get('error')}"
+        )
+
+    assert result["success"], (
+        f"OpenRouter API key check failed.\n"
+        f"Error: {result.get('error')}\n"
+        f"Tip: Check OPENROUTER_API_KEY in your .env"
+    )
+    assert result["response_text"].strip(), "OpenRouter returned an empty response"
+    print(f"\n[OK] OpenRouter | model={result['model']} | "
+          f"{result['latency_ms']}ms | response='{result['response_text'].strip()}'")
+

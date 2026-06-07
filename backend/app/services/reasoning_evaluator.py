@@ -11,7 +11,7 @@ Extends the SymPy validator with LLM-based reasoning evaluation:
 import logging
 
 from app.services.llm_client import (
-    call_gemini, parse_json_response, get_grading_system_prompt,
+    call_llm, parse_json_response, get_grading_system_prompt,
 )
 from app.services.sympy_validator import validate_expected_against_student
 
@@ -167,7 +167,7 @@ Return JSON:
         system_prompt = get_grading_system_prompt(subject, board, grade_level)
         system_prompt += REASONING_SYSTEM_PROMPT_SUFFIX
 
-        result = call_gemini(
+        result = call_llm(
             prompt,
             system_prompt=system_prompt,
             temperature=temperature,

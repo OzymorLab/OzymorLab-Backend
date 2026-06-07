@@ -22,7 +22,7 @@ import logging
 import time
 from typing import Optional
 
-from app.services.llm_client import get_client, parse_json_response
+from app.services.llm_client import get_client, parse_json_response, call_llm
 from app.services.ingestion import download_file, generate_presigned_url
 from app.config import settings
 
@@ -153,27 +153,25 @@ def evaluate_diagram_with_gemini(
         marking_notes=marking_notes,
     )
 
-    # ── Call Gemini Vision ───────────────────────────────────────────────────
+    # ── Call LLM Vision ──────────────────────────────────────────────────────
     try:
-        from google.genai import types as genai_types
-
-        client = get_client(api_key=api_key)
-        response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
-            contents=[
-                genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                prompt_text,
-            ],
-            config=genai_types.GenerateContentConfig(
-                system_instruction=_DIAGRAM_SYSTEM_PROMPT,
-                temperature=0.0,
-                max_output_tokens=1024,
-            ),
+        result = call_llm(
+            prompt=prompt_text,
+            system_prompt=_DIAGRAM_SYSTEM_PROMPT,
+            temperature=0.0,
+            max_tokens=1024,
+            image_bytes=image_bytes,
+            image_mime=mime_type,
+            call_type="diagram_vision_eval",
+            api_key=api_key,
         )
-        raw_text = response.text or ""
+        if not result["success"]:
+            logger.error(f"[DiagramVision] LLM call failed: {result.get('error')}")
+            return _error_result(step_num, max_marks, f"LLM call failed: {result.get('error')}")
+        raw_text = result["response_text"]
     except Exception as e:
-        logger.error(f"[DiagramVision] Gemini API call failed: {e}")
-        return _error_result(step_num, max_marks, f"Gemini Vision call failed: {e}")
+        logger.error(f"[DiagramVision] LLM call failed: {e}")
+        return _error_result(step_num, max_marks, f"LLM call failed: {e}")
 
     latency_ms = int((time.time() - start_time) * 1000)
 
