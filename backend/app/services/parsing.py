@@ -82,38 +82,29 @@ def _render_page_to_png(page: fitz.Page, scale: float = 2.0) -> bytes:
 
 
 def _ocr_page_single(image_bytes: bytes, page_num: int) -> str:
-    """Run OCR on a single page image using Gemini Client."""
-    from app.services.llm_client import get_client
-    from app.config import settings
-    from google.genai import types as genai_types
+    """Run OCR on a single page image using the configured LLM provider (Claude primary, Gemini fallback)."""
+    from app.services.llm_client import call_llm
 
-    client = get_client()
-    try:
-        response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
-            contents=[
-                genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-                OCR_PROMPT,
-            ],
-            config=genai_types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=4096,
-            ),
-        )
-        return response.text or ""
-    except Exception as e:
-        logger.error(f"[OCR] Page {page_num} Gemini call failed: {e}")
+    result = call_llm(
+        prompt=OCR_PROMPT,
+        temperature=0.0,
+        max_tokens=4096,
+        call_type=f"ocr_page_{page_num}",
+        image_bytes=image_bytes,
+        image_mime="image/png",
+    )
+    if not result["success"]:
+        logger.error(f"[OCR] Page {page_num} LLM call failed: {result.get('error')}")
         return ""
+    return result["response_text"] or ""
 
 
 def detect_diagram_boxes(image_bytes: bytes, mime_type: str) -> list[dict]:
     """
-    Call Gemini to detect diagrams, tables, flowcharts and return their normalized
+    Call the configured LLM to detect diagrams, tables, flowcharts and return their normalized
     bounding boxes [ymin, xmin, ymax, xmax] in the range 0 to 1000.
     """
-    from app.services.llm_client import get_client, parse_json_response
-    from app.config import settings
-    from google.genai import types as genai_types
+    from app.services.llm_client import call_llm, parse_json_response
 
     prompt = """
     Identify all diagrams, hand-drawn figures, drawings, graphs, tables, maps, circuits, or flowcharts on this page.
@@ -123,20 +114,19 @@ def detect_diagram_boxes(image_bytes: bytes, mime_type: str) -> list[dict]:
       {"type": "biological_diagram", "box_2d": [100, 200, 500, 800]}
     ]
     """
-    client = get_client()
     try:
-        response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
-            contents=[
-                genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                prompt,
-            ],
-            config=genai_types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=1024,
-            ),
+        result = call_llm(
+            prompt=prompt,
+            temperature=0.0,
+            max_tokens=1024,
+            call_type="diagram_detection",
+            image_bytes=image_bytes,
+            image_mime=mime_type,
         )
-        raw_text = response.text or ""
+        if not result["success"]:
+            logger.error(f"[Parse] Diagram detection failed: {result.get('error')}")
+            return []
+        raw_text = result["response_text"] or ""
         parsed = parse_json_response(raw_text)
         if isinstance(parsed, list):
             return parsed
@@ -312,12 +302,10 @@ def align_answers_to_questions(
     questions: list[dict],
 ) -> dict[str, str]:
     """
-    Call Gemini to align student answer blocks from the transcript to the
+    Call the configured LLM to align student answer blocks from the transcript to the
     list of questions from the task rubric.
     """
-    from app.services.llm_client import get_client, parse_json_response
-    from app.config import settings
-    from google.genai import types as genai_types
+    from app.services.llm_client import call_llm, parse_json_response
 
     if not questions:
         return {}
@@ -350,17 +338,17 @@ def align_answers_to_questions(
     }}
     """
 
-    client = get_client()
     try:
-        response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
-            contents=[prompt],
-            config=genai_types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=4096,
-            ),
+        result = call_llm(
+            prompt=prompt,
+            temperature=0.0,
+            max_tokens=4096,
+            call_type="answer_alignment",
         )
-        raw_text = response.text or ""
+        if not result["success"]:
+            logger.error(f"[Parse] LLM alignment failed: {result.get('error')}")
+            return parse_answers_fallback(full_transcript)
+        raw_text = result["response_text"] or ""
         parsed = parse_json_response(raw_text)
         if isinstance(parsed, dict):
             return {str(k): str(v) for k, v in parsed.items()}
