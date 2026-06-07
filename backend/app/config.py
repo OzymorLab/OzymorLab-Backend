@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-pro"
 
+    # ── Anthropic Claude AI (fallback provider) ──
+    CLAUDE_API_KEY: str = ""
+    CLAUDE_MODEL: str = "claude-opus-4-5"
+
+    # ── LLM Provider Strategy ──
+    # "claude_primary"  → Claude first, Gemini fallback (default)
+    # "gemini_primary"  → Gemini first, Claude fallback
+    # "gemini_only"     → Gemini only, no fallback
+    # "claude_only"     → Claude only, no fallback
+    LLM_PROVIDER_STRATEGY: str = "claude_primary"
+
     # ── Grading ──
     GRADING_TEMPERATURE: float = 0.0
     GRADING_MAX_RETRIES: int = 3
