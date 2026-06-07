@@ -153,7 +153,7 @@ def generate_presigned_url(object_key: str, expiry_seconds: int = 3600, user_tok
 
         # If relative, construct the absolute URL
         if signed_path.startswith("/"):
-            return f"{settings.SUPABASE_URL}{signed_path}"
+            return f"{settings.SUPABASE_URL}/storage/v1{signed_path}"
         return signed_path
     except Exception as e:
         logger.error(f"Failed to generate signed URL for {object_key}: {e}")

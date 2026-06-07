@@ -350,9 +350,9 @@ def align_answers_to_questions(
             return parse_answers_fallback(full_transcript)
         raw_text = result["response_text"] or ""
         parsed = parse_json_response(raw_text)
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and len(parsed) > 0:
             return {str(k): str(v) for k, v in parsed.items()}
-        return {}
+        return parse_answers_fallback(full_transcript)
     except Exception as e:
         logger.error(f"[Parse] LLM alignment failed: {e}")
         return parse_answers_fallback(full_transcript)
